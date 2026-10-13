@@ -186,6 +186,6 @@ leds-max77705 puts them: the ramp is 0x36 and the blink times 0x38 (0x35 and
 
 ## What was done about it (2026-10-13)
 
-- **Panel**: `panel_sleep=Y` at boot ([zboot-panel.conf](../rootfs/overlay/etc/tmpfiles.d/zboot-panel.conf)). Six off/on cycles in a row woke the panel every time. The saving (about 157 mA) is not yet measured on battery. Never toggle the parameter while the panel is asleep: it stays dark until the next screen-off/on cycle with `Y`.
+- **Panel**: tried `panel_sleep=Y` at boot; it wakes, but leaves dark patches on the panel (as under Plasma). Reverted to `N`. Needs the panel's own re-init after sleep-out before it can be used. Never toggle the parameter while the panel is asleep.
 - **Wi-Fi**: zrnperfd switches the radio off after 5 minutes of screen-off on battery, and back on with the screen or the charger.
 - **Not done**: SICD/cluster power-down in `zrn-idle` (can freeze the phone; only with someone at it and the charger in), and UFS/USB/PCIe runtime power management (needs an unplugged A/B first).
