@@ -1,0 +1,6 @@
+[submodule "third_party/s9plus"]
+	path = third_party/s9plus
+	url = https://github.com/SheroAbi/galaxy-s9plus-mainline-linux.git
+[submodule "third_party/AutoBrightnessLinux"]
+	path = third_party/AutoBrightnessLinux
+	url = https://github.com/z3r0n3br4instorm/AutoBrightnessLinux.git
