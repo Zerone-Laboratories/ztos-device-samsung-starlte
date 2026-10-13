@@ -186,9 +186,34 @@ leds-max77705 puts them: the ramp is 0x36 and the blink times 0x38 (0x35 and
 
 ## What was done about it (2026-10-13)
 
-- **Panel**: tried `panel_sleep=Y` at boot; it wakes, but leaves dark patches on the panel (as under Plasma). Reverted to `N`. Needs the panel's own re-init after sleep-out before it can be used. Never toggle the parameter while the panel is asleep.
+- **Panel**: sleeps when blanked (`panel_sleep=Y`), set by ztos-panel-selfmask.service once the self mask is off (see below). Never toggle the parameter while the panel is asleep.
 - **Wi-Fi**: zrnperfd switches the radio off after 5 minutes of screen-off on battery, and back on with the screen or the charger.
 - **Not done**: SICD/cluster power-down in `zrn-idle` (can freeze the phone; only with someone at it and the charger in), and UFS/USB/PCIe runtime power management (needs an unplugged A/B first).
+
+## The panel: why sleeping it left dark patches, and the fix (2026-10-13)
+
+The S6E3HA8 overlays an image from its own side memory on rows 0-149 and 2810-2959 (the rounded corners): the
+"self mask". Samsung's enable is `7A 01 00 00 00 95 0A FA 0B 8F ...`; the bootloader loads the image and enables it.
+The side memory is lost in DCS sleep while the mask stays enabled, so after any sleep-in/sleep-out the panel shows
+dark patches along the top and bottom (as it did under Plasma). Samsung's kernel reloads the image on each resume.
+
+The fix is Samsung's `self_mask_dis` sequence, once at boot: `F0 5A 5A`, `7A 00`, `F0 A5 A5`. It stays off across
+sleeps. [ztos-panel-selfmask](../rootfs/overlay/usr/local/sbin/ztos-panel-selfmask) sends it over /dev/mem and its
+service then sets `panel_sleep=Y`. Checked on the phone: clean after repeated sleep cycles, also after a reboot.
+The saving (about 157 mA) is still to be measured on battery.
+
+How it was found, for the next panel problem (all in [scripts/dev/dsim.py](../scripts/dev/dsim.py)):
+
+- The stock kernel in `stock/BOOT.img` is uncompressed and relocatable: the panel tables are reached through its
+  relocation entries (24 bytes: where, 0x403, value). Sequences are lists of packets: type 6 write, 7 DSC, 10 PPS,
+  1 delay, 16 key, 15 a nested sequence. Packets marked dynamic are templates the driver fills per resolution
+  (the PPS, scaler, caset, paset bytes in the packet are the 1080x2220 ones; the 1440x2960 rows are in the map tables).
+- The panel's PPS (register A2) and every readable register are identical before and after a sleep: nothing readable is lost.
+- Register 0F flips 80 -> 40 on sleep-out: the panel reloads its registers from its own memory.
+- A DCS read is not harmless here: afterwards the first byte of some registers (CA gamma, B8 IRC, B5, DF) reads 00 and
+  the screen is tinted; a sleep cycle brings it back. Long packets are now and then not taken: send keys more than once.
+- Brightness: the panel sits at the bootloader's (maximum) level; the shell only darkens pixels. Samsung's set-bl-seq
+  (gamma CA, AOR B1, ELVSS B5, ACL B4/55, IRC B8) is what real brightness control needs; its values are per-level tables.
 
 ## Samsung's panel sequences (from the stock kernel)
 
@@ -197,5 +222,5 @@ Read out of `stock/BOOT.img`'s panel tables (S6E3HA8, `star_a3_s0_*`). Samsung w
 resume it re-sends the init-seq: 5 ms, DSC on (DSI type 0x07), PPS (type 0x0A, 128 bytes), sleep out (0x11), 10 ms,
 scaler `BA`, caset `2A`, paset `2B`, set_area `1A`, TE on `35 00`, err_fg `ED 4C`, ffc `C5`, tsp_hsync `B9`, isc `F6 43`, then
 display on (0x29, keyed). Sleep in: display off (keyed), 20 ms, afc-off `E2 00` (keyed), 20 ms, sleep in 0x10, 100 ms.
-Our bare sleep-in/out left dark patches; the likely cause is the PPS not being re-sent.
+None of this turned out to be needed for a clean wake (the PPS survives sleep); the patches were the self mask.
 [scripts/dev/dsim.py](../scripts/dev/dsim.py) sends these from userspace over /dev/mem, `panel-test.sh` runs one cycle.
