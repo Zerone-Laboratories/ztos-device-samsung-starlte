@@ -189,3 +189,13 @@ leds-max77705 puts them: the ramp is 0x36 and the blink times 0x38 (0x35 and
 - **Panel**: tried `panel_sleep=Y` at boot; it wakes, but leaves dark patches on the panel (as under Plasma). Reverted to `N`. Needs the panel's own re-init after sleep-out before it can be used. Never toggle the parameter while the panel is asleep.
 - **Wi-Fi**: zrnperfd switches the radio off after 5 minutes of screen-off on battery, and back on with the screen or the charger.
 - **Not done**: SICD/cluster power-down in `zrn-idle` (can freeze the phone; only with someone at it and the charger in), and UFS/USB/PCIe runtime power management (needs an unplugged A/B first).
+
+## Samsung's panel sequences (from the stock kernel)
+
+Read out of `stock/BOOT.img`'s panel tables (S6E3HA8, `star_a3_s0_*`). Samsung wraps every panel command in access-key writes
+(`9F A5 A5` ... `9F 5A 5A`, `F0 5A 5A` ... `F0 A5 A5`, `FC 5A 5A` ... `FC A5 A5`), which our driver does not, and on every
+resume it re-sends the init-seq: 5 ms, DSC on (DSI type 0x07), PPS (type 0x0A, 128 bytes), sleep out (0x11), 10 ms,
+scaler `BA`, caset `2A`, paset `2B`, set_area `1A`, TE on `35 00`, err_fg `ED 4C`, ffc `C5`, tsp_hsync `B9`, isc `F6 43`, then
+display on (0x29, keyed). Sleep in: display off (keyed), 20 ms, afc-off `E2 00` (keyed), 20 ms, sleep in 0x10, 100 ms.
+Our bare sleep-in/out left dark patches; the likely cause is the PPS not being re-sent.
+[scripts/dev/dsim.py](../scripts/dev/dsim.py) sends these from userspace over /dev/mem, `panel-test.sh` runs one cycle.
