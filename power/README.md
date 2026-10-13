@@ -12,6 +12,63 @@ SYSTEM_SUSPEND, Samsung sleeps the system through its own ACPM path.
 (time, %, mV, current now/avg in mA, cable, screen). A baseline needs the
 cable out; none has been taken yet.
 
+## Measured: where the idle power goes (2026-10-13)
+
+With the cable out and the screen "off" the phone draws **about 600 mA** (the
+fuel gauge's `current_now`; `scripts/dev/power-ab.sh` does it, cumulative steps,
+20 one-second readings each). With the cable in, the same changes can be read
+as differences of the charge current (noise about +-14 mA).
+
+| step (cumulative) | draw |
+| --- | --- |
+| baseline, screen off | -594 / -623 mA |
+| Wi-Fi radio off (`nmcli radio wifi off`) | -537 |
+| sensor hub daemons paused (SIGSTOP lhd, zrnsensord) | -509 |
+| modem daemon, perfd, framework paused | no change |
+| cpu1-3 offline | no change (-513) |
+| display panel put to sleep (`s9p_decon panel_sleep=Y`) | **-356** |
+
+- **The CPU cores are not the drain.** Three cores powered off changed nothing.
+  A cpuidle driver that only powers cores down cannot fix the idle draw.
+- **The panel is 157 mA** with the screen "off" (the README's 150 mW was a
+  guess): `screen_set(false)` only disables DECON; `panel_sleep=N` keeps the
+  panel out of sleep mode. Sleep mode needs the panel's own wake sequence
+  (the black-spikes issue).
+- **Wi-Fi radio 70 mA, sensor hub daemons 28 mA.**
+- **~350 mA remain** with all of that off.
+- **None of the SoC's power domains matters by itself.** 15 of the 16 are on
+  (`scripts/dev/pmu-domains.py`; only the GPU is off, via its genpd), but
+  powering each of the unused ones off through the PMU (`pd-ab.py`, CONFIGURATION
+  then STATUS, as Samsung's `flexpmu_cal_local_exynos9810.h`) moved nothing.
+
+### What Samsung's kernel does that ours does not
+
+Read from `third_party/vendor-kernel/drivers/soc/samsung/exynos-powermode.c`
+and `cal-if/`: three levels, and ours stops at the first.
+
+1. **C2 per core**: the CPU_INFORM hint and wake line (done: zrn-cpuidle,
+   zrn-hotplug).
+2. **CPD**, cluster power-down, **only for the non-boot cluster** ("power down
+   of boot cluster have nothing to gain power consumption, so it is not
+   supported"): `big_reset_control(0)` and the cluster sequence, then PSCI
+   state `PSCI_CLUSTER_SLEEP`. Putting all four little cores in C2 is not
+   something Samsung does; it is what froze this phone.
+3. **SICD, System Idle Clock Down**: entered by a boot-cluster core when *every*
+   online core is in C2 with enough idle time (`sicd_residency` 10 ms) and the
+   PMU's IDLE_IP bits say the blocks are idle: `exynos_prepare_sys_powerdown(SYS_SICD)`
+   writes the SICD hint, then PSCI `PSCI_SYSTEM_IDLE`. The always-on firmware
+   (ACPM) then runs its sequencers: PLLs off (FSYS0, CPUCL1, CMU_TOP), the memory
+   interface down (`soc_sequencer_sicd_down`, `mif_sequencer_sicd_down`).
+   This is the step that stops the memory and bus clocks, which nothing in
+   mainline does.
+
+SICD's idle list (`exynos-powermode`, `idle-ip` in `stock/twrp-live.dts`) is
+every I2C and SPI controller, UFS, the SD controller, USB, both PCIe
+controllers, the mailbox, DisplayPort, Bluetooth and **all 15 power domains**.
+On this phone the PMU's IDLE_IP status registers read all zero and the masks
+all ones (`scripts/dev/idle-ip.py`): nothing reports, and nothing is
+required, so the decision is entirely ours.
+
 ## Per-core power-down: `idle/zrn-cpuidle.ko`
 
 The stock device tree has one idle state per core, PSCI CPU_SUSPEND `0x10000`
