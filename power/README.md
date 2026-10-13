@@ -183,3 +183,9 @@ in ms). Off the charger at 15 % or less it breathes red once a second (up
 400 ms, lit 100, down 400, dark 100). The registers are not where mainline's
 leds-max77705 puts them: the ramp is 0x36 and the blink times 0x38 (0x35 and
 0x37 hold nothing), so until now "blinking" had only been setting a ramp.
+
+## What was done about it (2026-10-13)
+
+- **Panel**: `panel_sleep=Y` at boot ([zboot-panel.conf](../rootfs/overlay/etc/tmpfiles.d/zboot-panel.conf)). Six off/on cycles in a row woke the panel every time. The saving (about 157 mA) is not yet measured on battery. Never toggle the parameter while the panel is asleep: it stays dark until the next screen-off/on cycle with `Y`.
+- **Wi-Fi**: zrnperfd switches the radio off after 5 minutes of screen-off on battery, and back on with the screen or the charger.
+- **Not done**: SICD/cluster power-down in `zrn-idle` (can freeze the phone; only with someone at it and the charger in), and UFS/USB/PCIe runtime power management (needs an unplugged A/B first).
