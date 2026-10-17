@@ -1,3 +1,37 @@
+# Full MIF sleep: what the hang is — 2026-10-18
+
+The RAM loses data while the memory interface is down; the kernel wakes into
+corrupted memory and hangs. Evidence, all on kernel #30 with
+`mif-trial.sh mif` (modem and audio off, FVP release, MIF 421 / INT 107 MHz):
+
+* Trials 1, 3, 4 and 5 hung; trial 2 was woken after 2 s by an external
+  interrupt (wake_stat 0x80000001) before MIF went down, and resumed.
+* `zrn-lastlog` (lastlog/, a console copied uncached to 0xff580000, which TWRP
+  leaves alone) caught trial 5. The text is readable but has sparse single-bit
+  errors throughout, also in lines written long before suspend ("3pace",
+  "@M:", "123,680103"). The last line is `Calling cpu_pm_suspend`, just before
+  the SMC; nothing after it.
+* Control: a hard reset (Vol Down + Power, PMIC) of an awake phone zeroes that
+  region instead (61,145 of 65,520 bytes zero); a clean reboot keeps it intact.
+  The bit errors therefore come from the sleep, not from the reset.
+* Sparse flips in readable text mean the cells kept power but were not
+  refreshed: the DRAM was not in self-refresh, or left it, while MIF was down.
+* Ruled out while awake (256 MiB pattern held 60 s, 0 bytes changed after each
+  step): Samsung's low-power init (40 registers), the ACPM FVP release with
+  MIF 421 / INT 107 MHz, and modem power-off.
+* Ruled out: the PMIC rails. Decoded with LineageOS's s2mps18-private.h,
+  vdd2_mem (BUCK8, 0x2e) is mode 3, always on, and vddq_mem (BUCK9, 0x30)
+  mode 2, on with PWREN_MIF, identical to stock. Only L32 (0x69: mainline on,
+  stock mode 2) and B6 (0x2a bit 3) differ.
+* Our enter/exit tables write no LPDDR4 retention: that step is ACPM's
+  (mif_sequencer_sleep_down), whose code matches stock byte for byte. What is
+  left is an input that firmware reads and Samsung's kernel sets.
+
+Recovery: after a hang the reset may boot TWRP first, which overwrites
+pstore's region, so `/var/lib/systemd/pstore` alone is not enough;
+`ztos-pstore-keep.service` keeps each boot's records, and zrn-lastlog's copy
+survives TWRP (insmod it again, read /proc/zrn-lastlog-previous).
+
 # Current verification status — 2026-10-16
 
 Latest Wi-Fi resume result: kernel #27 passed two consecutive AP-only
