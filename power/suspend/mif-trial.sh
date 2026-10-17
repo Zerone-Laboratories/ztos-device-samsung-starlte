@@ -13,8 +13,8 @@
 # A mif trial has always hung so far. Run it only with someone at the phone:
 # after a hang, force it straight into TWRP (Vol Up + Bixby + Power) so the
 # console log of the hang survives, and run power/watch-recovery.py on the
-# laptop to collect it. Any later ztOS boot also archives it, through
-# systemd-pstore, in /var/lib/systemd/pstore.
+# laptop to collect it. zrn-lastlog keeps a copy that survives TWRP: see
+# below.
 set -eu
 MODE=${1:?ap or mif}
 case "$MODE" in ap) TARGET=--allow-ap-only ;; mif) TARGET=--allow-mif-sleep ;; *) exit 2 ;; esac
@@ -74,8 +74,10 @@ rmmod snd_zrn_abox
 printf 'screen off\n' > /run/user/1000/ztmetro.ctl
 sleep 2
 echo 0 > $P/dry_run
-# every message up to the firmware call into the console log (ramoops),
-# which systemd-pstore archives on the next ztOS boot after a hang
+# every message up to the firmware call into the console log, and into
+# zrn-lastlog's memory, which TWRP leaves alone: after a hang, insmod
+# zrn-lastlog.ko again and read /proc/zrn-lastlog-previous
+[ -d /sys/module/zrn_lastlog ] || insmod "$D/zrn-lastlog.ko"
 echo N > /sys/module/printk/parameters/console_suspend
 echo 1 > /sys/power/pm_debug_messages
 echo 8 > /proc/sys/kernel/printk
