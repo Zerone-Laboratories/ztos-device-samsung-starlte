@@ -3,6 +3,9 @@
 #
 #   mif-trial.sh ap    AP sleep only (memory stays up): wakes by itself
 #   mif-trial.sh mif   full sleep, memory interface (MIF) down as well
+#   mif-trial.sh mif-cp  the same with the modem left running, as stock
+#                        sleeps (exynos_check_cp_status): MIF goes down only
+#                        if the modem lets go of memory by itself
 #
 # Puts together what the 2026-10-16 trials did by hand from /tmp: the RTC
 # driver and calendar, the suspend-aware hotplug driver, the guarded backend
@@ -17,7 +20,7 @@
 # below.
 set -eu
 MODE=${1:?ap or mif}
-case "$MODE" in ap) TARGET=--allow-ap-only ;; mif) TARGET=--allow-mif-sleep ;; *) exit 2 ;; esac
+case "$MODE" in ap) TARGET=--allow-ap-only ;; mif|mif-cp) TARGET=--allow-mif-sleep ;; *) exit 2 ;; esac
 D=$(cd "$(dirname -- "$0")" && pwd)
 LIB=/usr/local/libexec/ztos-power
 SLEEP=zrn_sleep_init
@@ -63,13 +66,15 @@ finish() {
 }
 trap finish EXIT
 # memory sleeps only when every master lets go of it: the modem and audio too
-systemctl stop ztoscorenetworking.service ztoscorenetworking-modem.service
-python3 - <<'PY'
+if [ "$MODE" != mif-cp ]; then
+	systemctl stop ztoscorenetworking.service ztoscorenetworking-modem.service
+	python3 - <<'PY'
 import os, fcntl
 fd = os.open('/dev/umts_boot0', os.O_RDWR)
 fcntl.ioctl(fd, 0x6f20, 0)  # modem power off
 os.close(fd)
 PY
+fi
 runuser -u zerone -- env XDG_RUNTIME_DIR=/run/user/1000 \
 	systemctl --user stop wireplumber.service pipewire.service pipewire.socket
 rmmod snd_zrn_abox
