@@ -41,6 +41,8 @@ fi
 rm -f /var/lib/zrn-cpuidle/loading
 [ -d /sys/module/zrn_cpuidle ] || ZRN_CPUIDLE_CPUS=0xff ZRN_CPUIDLE_SICD=0 ZRN_CPUIDLE_RELAX=0 \
 	ZRN_CPUIDLE_S2IDLE_SICD=0 /usr/local/sbin/zrn-cpuidle try
+# ACPM's TMU plugin, which Samsung's kernel attaches at boot and ours did not
+python3 "$D/load-acpm-tmu.py" "$D/exynos9810_acpm_tmu.fw" $LIB/s9p-acpm
 P=/sys/module/$SLEEP/parameters
 echo "init: changes $(cat $P/init_changes), verified $(cat $P/init_verified)"
 
