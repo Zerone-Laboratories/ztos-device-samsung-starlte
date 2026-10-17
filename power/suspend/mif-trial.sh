@@ -13,7 +13,8 @@
 # A mif trial has always hung so far. Run it only with someone at the phone:
 # after a hang, force it straight into TWRP (Vol Up + Bixby + Power) so the
 # console log of the hang survives, and run power/watch-recovery.py on the
-# laptop to collect it.
+# laptop to collect it. Any later ztOS boot also archives it, through
+# systemd-pstore, in /var/lib/systemd/pstore.
 set -eu
 MODE=${1:?ap or mif}
 case "$MODE" in ap) TARGET=--allow-ap-only ;; mif) TARGET=--allow-mif-sleep ;; *) exit 2 ;; esac
@@ -48,6 +49,8 @@ CONTROLLER=$(cat "$UDC")
 finish() {
 	echo 1 > $P/dry_run
 	echo 0 > $P/mif_sleep
+	echo 0 > /sys/power/pm_debug_messages
+	echo Y > /sys/module/printk/parameters/console_suspend
 	printf '%s' "$CONTROLLER" > "$UDC"
 	modprobe snd-zrn-abox || true
 	runuser -u zerone -- env XDG_RUNTIME_DIR=/run/user/1000 \
@@ -71,6 +74,11 @@ rmmod snd_zrn_abox
 printf 'screen off\n' > /run/user/1000/ztmetro.ctl
 sleep 2
 echo 0 > $P/dry_run
+# every message up to the firmware call into the console log (ramoops),
+# which systemd-pstore archives on the next ztOS boot after a hang
+echo N > /sys/module/printk/parameters/console_suspend
+echo 1 > /sys/power/pm_debug_messages
+echo 8 > /proc/sys/kernel/printk
 sync
 printf '\n' > "$UDC"
 ZRN_SYSTEM_SLEEP_MODULE=$SLEEP python3 -u $LIB/suspend-test.py --mem-sleep deep \
