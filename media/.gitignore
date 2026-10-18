@@ -1,0 +1,4 @@
+# made by build.sh
+driver/mfc-overlay.dtbo
+driver/mfc-overlay.dtbo.h
+modules/

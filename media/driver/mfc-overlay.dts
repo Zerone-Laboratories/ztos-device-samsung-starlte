@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * The Exynos 9810's MFC (video codec, v12) for the running kernel, as a
+ * device tree overlay applied by zrn-mfc-overlay.ko. The bootloader hands the
+ * MFC over powered (PMU 0x14064068 = 0xf) and clocked (CMU_MFC set as the
+ * vendor does), so this needs no power domain yet; the clock is a stub for
+ * the rate the vendor runs it at (400 MHz), which mainline s5p-mfc only asks
+ * for by name. Facts from the vendor DT (mfc0@178D0000, ip_ver 0x11 = v12).
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/soc@0";
+		__overlay__ {
+			mfc_clk: clock-mfc {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <400000000>;
+				clock-output-names = "mfc_aclk_stub";
+			};
+
+			mfc@178d0000 {
+				/* mainline knows the 9810's v12 as Tesla FSD's */
+				compatible = "samsung,exynos9810-mfc", "tesla,fsd-mfc";
+				reg = <0x178d0000 0x10000>;
+				interrupts = <0 356 4>;		/* SPI 356, level high */
+				clocks = <&mfc_clk>;
+				clock-names = "mfc";
+			};
+		};
+	};
+};
