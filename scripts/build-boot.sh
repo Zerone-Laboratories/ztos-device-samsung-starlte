@@ -74,7 +74,14 @@ grep -q starlte-zt "$SRC/arch/arm64/boot/dts/exynos/Makefile"
 echo "=== port drivers ==="
 BUILD=$B bash "$PORT/scripts/build/apply_drivers.sh" "$SRC" | tail -n 3
 # our own changes to the port's drivers, applied to the copies in the tree
+# the panel brightness (AOR) as /sys/class/backlight/s9p-panel, and the panel
+# commands sent with the frame trigger held off; kept here, not in the port
+patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$ROOT/kernel/s9p-decon-backlight.patch"
+grep -q s9p_bl_ops "$SRC/drivers/gpu/drm/s9p/s9p-decon.c" ||
+	{ echo "s9p-decon.c has no backlight device after patching" >&2; exit 1; }
+python3 "$ROOT/kernel/patch-decon-wake.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-flip.py" "$SRC"
+python3 "$ROOT/kernel/patch-decon-panel-lock.py" "$SRC"
 python3 "$ROOT/kernel/patch-suspend-mpidr.py" "$SRC"
 python3 "$ROOT/kernel/patch-ufs-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-touch-suspend.py" "$SRC"
