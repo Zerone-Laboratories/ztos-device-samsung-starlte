@@ -16,6 +16,7 @@
  * Lines on /run/ztoscsf-sensord.ctl (anyone may write):
  *	screen off | on		from zrnperfd, as the display goes off and on
  *	auto on | off		auto brightness (remembered)
+ *	opentone on | off	the screen's colour follows the room's (remembered)
  *	watch NAME [MS]		also stream accel | gyro | pressure | prox, for the
  *				next five seconds (say it again to go on)
  *	unwatch NAME
@@ -194,24 +195,61 @@ static void brightness_show(int percent) {
 	shell(line);
 }
 
-/* Softer, calibrated AMOLED brightness curve tailored to human eye response:
- * Dim rooms (1-50 lux): 8% - 20%
- * Office / indoor (100-500 lux): 22% - 38%
- * Bright daylight / direct sun (1000-50000+ lux): 45% - 100%
+/* AMOLED brightness from ambient light, continuous across the bands. Lowered
+ * 2026-10-18 (the old curve, 8-22 % dim, 22-45 % indoors, felt too bright):
+ * Dark (below 1 lux):            3 %
+ * Dim rooms (1-100 lux):         4 % - 14 %
+ * Office / indoor (100-1000):   14 % - 30 %
+ * Daylight (1000-10000):        30 % - 70 %
+ * Direct sun (10000-100000):    70 % - 100 %
  */
 static int lux_to_percent(double lux) {
-	double pct;
+	double pct, l = log10(lux < 1.0 ? 1.0 : lux);
 	if (lux < 1.0) {
-		pct = 5.0;
-	} else if (lux < 100.0) {
-		pct = 8.0 + (log10(lux) / 2.0) * 14.0;
-	} else if (lux < 1000.0) {
-		pct = 22.0 + ((log10(lux) - 2.0) / 1.0) * 23.0;
+		pct = 3.0;
+	} else if (l < 2.0) {
+		pct = 4.0 + l / 2.0 * 10.0;
+	} else if (l < 3.0) {
+		pct = 14.0 + (l - 2.0) * 16.0;
+	} else if (l < 4.0) {
+		pct = 30.0 + (l - 3.0) * 40.0;
 	} else {
-		pct = 45.0 + ((log10(lux) - 3.0) / 2.0) * 55.0;
+		pct = 70.0 + (l - 4.0) * 30.0;
 	}
 	int res = (int)lround(pct);
-	return res < 5 ? 5 : res > 100 ? 100 : res;
+	return res < 3 ? 3 : res > 100 ? 100 : res;
+}
+
+/* OpenTone: the screen's white follows the room's light, as True Tone does.
+ * The hub's light sensor reports the room's colour temperature itself (CCT,
+ * kelvin), so no camera is needed. Smoothed over about half a minute, then
+ * moved part of the way: a 2700 K room gives the screen about 5000 K, a
+ * 4000 K one about 5500 K, daylight leaves it at 6500 (no change). The
+ * shell does the colour (`tone KELVIN` on its control pipe). */
+static bool tone_on;
+static double cct_smooth = -1;
+static int tone_sent = -1;
+
+static void tone_send(int kelvin) {
+	char line[32];
+	snprintf(line, sizeof(line), "tone %d\n", kelvin);
+	shell(line);
+	if (tone_sent < 0 || abs(kelvin - tone_sent) >= 300 || kelvin == 6500) {
+		fprintf(stderr, "ztoscsf-sensord: opentone: screen %d K\n", kelvin);
+	}
+	tone_sent = kelvin;
+}
+
+static void tone(int32_t cct) {
+	if (!tone_on || !screen_on || cct < 1000 || cct > 20000) {
+		return;
+	}
+	cct_smooth = cct_smooth < 0 ? cct : cct_smooth * 0.95 + cct * 0.05;
+	double k = 6500 - 0.4 * (6500 - cct_smooth);
+	int display = (int)lround(k < 5000 ? 5000 : k > 6500 ? 6500 : k);
+	if (tone_sent < 0 || abs(display - tone_sent) >= 75) {
+		tone_send(display);
+	}
 }
 
 static void light(uint32_t lux) {
@@ -248,6 +286,7 @@ static void record(struct sensor *s, const uint8_t *d) {
 		memcpy(&cct, d + 4, 4);
 		memcpy(rgbw, d + 8, 8);
 		light(lux);
+		tone(cct);
 		/* files only when the value really changes: 5 % lux (at least 2), or 100 K */
 		uint32_t step = last == ~0u ? 0 : last / 20 < 2 ? 2 : last / 20;
 		if (last != ~0u && (lux > last ? lux - last : last - lux) < step &&
@@ -412,14 +451,15 @@ static void save(void) {
 	FILE *f = fopen(STATE, "w");
 	if (f) {
 		fprintf(f, "auto %s\n", auto_on ? "on" : "off");
+		fprintf(f, "opentone %s\n", tone_on ? "on" : "off");
 		fclose(f);
 	}
 }
 
 static void status(void) {
 	char text[64];
-	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\n", auto_on ? "on" : "off",
-		screen_on ? "on" : "off");
+	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\n", auto_on ? "on" : "off",
+		screen_on ? "on" : "off", tone_on ? "on" : "off");
 	publish("status", text);
 }
 
@@ -436,6 +476,16 @@ static void command(char *line, bool persist) {
 	} else if (strcmp(what, "auto") == 0) {
 		auto_on = strcmp(value, "on") == 0;
 		goal = shown = -1;
+		if (persist) {
+			save();
+		}
+	} else if (strcmp(what, "opentone") == 0) {
+		tone_on = strcmp(value, "on") == 0;
+		cct_smooth = -1;
+		if (!tone_on && tone_sent >= 0 && tone_sent != 6500) {
+			tone_send(6500);	/* back to plain white */
+		}
+		tone_sent = -1;
 		if (persist) {
 			save();
 		}
