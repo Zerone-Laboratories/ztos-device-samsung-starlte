@@ -1,3 +1,44 @@
+# Full MIF sleep: stock works on this phone, ours does not — 2026-10-18 (later)
+
+Samsung's kernel sleeps with MIF down on this exact phone and boot chain.
+TWRP (Samsung 4.9.118 kernel), USB cable unplugged, `echo +15 > wakealarm;
+echo mem > /sys/power/state`: flexpmu-dbg `[SLEEP] MIF seq down` 0 -> 1,
+`EXYNOS-PM: MIF down. cur_count: 1`, woken by IRQ 277 (s2mps18 RTC), rc=0.
+Log: `build/power-analysis/twrp-stock-sleep.log`. So the hardware, sboot,
+the EL3 monitor and ACPM are fine; the gap is in what our Linux does or
+leaves undone. With the cable in, TWRP refuses suspend (usb_notify, dwc3-otg
+wakeup sources): unplug for this test.
+
+Ruled out since (each a hung `mif` trial, stopping at `Calling cpu_pm_suspend`,
+old log lines with bit flips afterwards):
+
+* MIF frequency before sleep. Stock logs `devfreq_mif: Suspend_frequency is
+  421000`, as we use; 1014 MHz (`freq_info[2]`, not what the driver applies)
+  hangs the same way.
+* PMIC buck ramp rates. Stock leaves BUCKRAMP/BUCKRAMP2 (0x3f/0x40) at 0x00
+  (6 mV/us, from regulator-ramp-delay 6000); mainline keeps the reset
+  0x45/0x15. `mif-trial.sh` now writes stock's values; still hangs.
+* ACPM's tables. Decoded with REA/Ghidra: sleep_down switches the four MIF
+  clock muxes off their PLLs, powers down MIF-side PMU blocks, sets buck
+  modes and vddq_mem 450 mV (600 mV on wake), and never writes the DMC: no
+  software self-refresh command. Live and CSE3 tables are identical. Row 21
+  (op 13) checks PMU 0x14060880 for 0x0BADABCD and otherwise runs a PMIC
+  OCP re-init once; ACPM writes the magic itself, stock alike.
+* Inputs to the firmware: INFORM 4 (sleep table), PSCI power_state
+  0x03000000 (= Samsung's PSCI_SYSTEM_SLEEP), lpm_init (the 19 rows we skip
+  are G3D, audio, shortstop, PS_HOLD, DCF), the `mif_always_on` flag (stock
+  debugfs shows 1 = MIF sequencing allowed).
+
+Other PMIC differences (TWRP vs ztOS, all registers, via TWRP's
+`s2mps18-regs` debugfs and `s9p-acpm read 1`): L2/L31 (SD card) on in TWRP,
+L32 always-on in ours, buck output voltages (DVFS state). Files:
+`build/power-analysis/pmic-twrp.txt`, `pmic-ztos.txt`. DMC registers awake
+in ztOS: `dmc-ztos-awake.json` (TWRP has no /dev/mem).
+
+Stock's suspend does what ours does not, from its log: Trustonic TEE core
+switch to CPU0 before hotplug, fingerprint (etspi) suspend SMC, modem
+suspend with pda_active 0, every devfreq to its suspend frequency.
+
 # Full MIF sleep: what the hang is — 2026-10-18
 
 The RAM loses data while the memory interface is down; the kernel wakes into

@@ -22,8 +22,8 @@ p.add_argument('--allow-ap-only', action='store_true',
                help='allow deep sleep verification to succeed on sleep_ap even if sleep_mif does not advance')
 p.add_argument('--acpm-fvp-tool', type=Path,
                help='opt in to Samsung MIF/INT FVP suspend handshake using the corrected s9p-acpm tool')
-p.add_argument('--mif-suspend-khz', type=int, choices=[421000],
-               help='explicit audited Samsung MIF suspend frequency; needs verified restore frequency')
+p.add_argument('--mif-suspend-khz', type=int, choices=[421000, 1014000],
+               help='MIF frequency before sleep; stock logs Suspend_frequency 421000; needs verified restore frequency')
 p.add_argument('--mif-restore-khz', type=int, choices=[1794000],
                help='explicit pre-test MIF frequency verified by hardware clock audit')
 p.add_argument('--int-suspend-khz', type=int, choices=[107000],

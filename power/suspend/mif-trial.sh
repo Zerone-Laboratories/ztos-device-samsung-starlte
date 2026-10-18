@@ -46,6 +46,13 @@ rm -f /var/lib/zrn-cpuidle/loading
 	ZRN_CPUIDLE_S2IDLE_SICD=0 /usr/local/sbin/zrn-cpuidle try
 # ACPM's TMU plugin, which Samsung's kernel attaches at boot and ours did not
 python3 "$D/load-acpm-tmu.py" "$D/exynos9810_acpm_tmu.fw" $LIB/s9p-acpm
+# Buck ramp rates as Samsung's regulator driver leaves them: every buck has
+# regulator-ramp-delay = <6000> in the stock tree, code 0 (6 mV/us) in
+# BUCKRAMP (0x3f) and BUCKRAMP2 (0x40). Mainline has no S2MPS18 driver and
+# keeps the reset values 0x45/0x15 (12 mV/us on vdd_mif, vdd_int, the
+# memory rails and others).
+python3 $LIB/s9p-acpm write 1 63 0
+python3 $LIB/s9p-acpm write 1 64 0
 P=/sys/module/$SLEEP/parameters
 echo "init: changes $(cat $P/init_changes), verified $(cat $P/init_verified)"
 
@@ -91,6 +98,6 @@ echo 8 > /proc/sys/kernel/printk
 sync
 printf '\n' > "$UDC"
 ZRN_SYSTEM_SLEEP_MODULE=$SLEEP python3 -u $LIB/suspend-test.py --mem-sleep deep \
-	--wake-source rtc --seconds 10 --connected-diagnostic --ignore-host-req-wake \
-	--acpm-fvp-tool $LIB/s9p-acpm --mif-suspend-khz 421000 --mif-restore-khz 1794000 \
+	--wake-source rtc --seconds ${TRIAL_SECONDS:-10} --connected-diagnostic --ignore-host-req-wake \
+	--acpm-fvp-tool $LIB/s9p-acpm --mif-suspend-khz ${MIF_SUSPEND_KHZ:-421000} --mif-restore-khz 1794000 \
 	--int-suspend-khz 107000 --int-restore-khz 534000 $TARGET
