@@ -79,6 +79,11 @@ BUILD=$B bash "$PORT/scripts/build/apply_drivers.sh" "$SRC" | tail -n 3
 patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$ROOT/kernel/s9p-decon-backlight.patch"
 grep -q s9p_bl_ops "$SRC/drivers/gpu/drm/s9p/s9p-decon.c" ||
 	{ echo "s9p-decon.c has no backlight device after patching" >&2; exit 1; }
+# PCIe (the BCM4361 Wi-Fi) survives system sleep: stop the link on suspend and
+# replay PHY/host setup on resume, since SYS_SLEEP loses ELBI and iATU state
+patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$ROOT/kernel/s9p-pcie-pm.patch"
+grep -q exynos9810_pcie_pm_ops "$SRC/drivers/pci/controller/dwc/pcie-exynos9810.c" ||
+	{ echo "pcie-exynos9810.c has no suspend/resume PM ops after patching" >&2; exit 1; }
 python3 "$ROOT/kernel/patch-decon-wake.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-flip.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-lock.py" "$SRC"
