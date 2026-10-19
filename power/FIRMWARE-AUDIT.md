@@ -38,6 +38,13 @@ python3 scripts/dev/samsung-power-audit.py /path/to/firmware.zip
 Kernel #24 (`out/ztos-sleep-input.img`, SHA-256
 `21c7be4d08cfd0c071504d8b849bd49e66182e07a71d49857bd94836dc8e9670`)
 is installed with all eight CPUs enrolled in C2 (`ZRN_CPUIDLE_CPUS=0xff`).
+
+**Changed 2026-10-19:** back to `ZRN_CPUIDLE_CPUS=0x0c` (cores 2 and 3, the
+script's own stable mask). With all eight cores in C2, panel commands from
+the brightness table took 5-9 ms instead of ~0.2 ms, and the display stopped
+latching frames (`vblank wait timed out`, frozen or green screen) after a
+few brightness changes. With `0x0c` the same stress test and screen cycles
+ran with no lost frames.
 Runtime SICD and experimental system SICD remain disabled by default.
 RECOVERY is still TWRP. Always warm boot from TWRP for sensor-hub tests.
 
