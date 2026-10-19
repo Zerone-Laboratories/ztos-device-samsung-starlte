@@ -562,10 +562,21 @@ def vendor_packets(pk):
     the panel kept only the first two bytes of the next gamma: green and
     blue at the top went to zero, and the screen stayed red until a reboot
     (2026-10-19, webcam and a CA readback)."""
-    out = []
+    out, skip = [], False
     for p in pk:
         p = list(p)
-        short = (p[0] == 0xB0 and len(p) == 2) or len(p) == 1
+        if p[0] == 0xB0 and len(p) == 2:
+            # no offset writes: on this panel the offset outlives the next
+            # command, and the following gamma landed shifted (red again
+            # after a reboot). The two packets written at an offset (ELVSS
+            # temperature B5@0x16, ACL dimming B4@0x0F) hold the panel's
+            # own values already (OTP 0x13; ACL is off).
+            skip = True
+            continue
+        if skip:
+            skip = False
+            continue
+        short = len(p) == 1
         out.append((p, not short))
     return out
 
