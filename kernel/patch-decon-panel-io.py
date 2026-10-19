@@ -82,6 +82,8 @@ edits = [
 	u8 *bl_upload;			/* bl_table as it arrives */
 	size_t bl_upload_len;
 	int bl_sent;			/* table level on the panel now; -1 none */
+	unsigned long bl_last;		/* jiffies of the last brightness change */
+	struct delayed_work bl_settle;	/* the whole set, once changes stop */
 	unsigned long bl_on_at;		/* jiffies of the last display-on */
 };"""),
 ]
@@ -297,35 +299,33 @@ static void s9p_dsim_write_long(struct s9p_decon *priv, const u8 *data, size_t l
 }
 
 /* the level's packets, verbatim; caller holds panel_lock, panel enabled */
-static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level)
+static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level, bool whole)
 {
 	static int shown;
 	const u8 *e;
 	unsigned int n, len;
 	ktime_t t0;
-	u32 v;
 
 	if (level >= priv->bl_levels)
 		level = priv->bl_levels - 1;
 	e = priv->bl_table + (size_t)level * priv->bl_stride;
 	/*
-	 * Twenty packets, the gamma alone 35 bytes, between two frames. This
-	 * DSIM does not keep a command out of a frame transfer by itself: one
-	 * sent across a frame underran it and put the DSIM into its abnormal
-	 * command state, and holding the frame trigger off instead, for as long
-	 * as the set takes, ran into its 18 ms TE timeout. So the set goes
-	 * straight after a frame has gone (FRAME_DONE), in the quiet before
-	 * the next TE; with nothing being drawn no frame comes within 20 ms,
-	 * and then nothing is in the way.
+	 * With the frame trigger held off, as the AOR path sends: sent with
+	 * frames running, the panel came out of its next sleep dark. The hold
+	 * stays short because no packet is long (s9p-bl-table.py splits the
+	 * gamma and IRC into pieces of 10 bytes): a 35-byte command sent across
+	 * a frame jammed the DSIM, and a hold as long as a frame ran into its
+	 * 18 ms TE timeout; the whole set takes about 200 us.
 	 */
-	writel_relaxed(DSIM_INTSRC_FRAME_DONE, priv->dsim + DSIM_INTSRC);
-	readl_poll_timeout(priv->dsim + DSIM_INTSRC, v, v & DSIM_INTSRC_FRAME_DONE,
-			   20, 20000);
+	s9p_hw_trigger_mask(priv);
+	s9p_wait_shadow_idle(priv);
 	t0 = ktime_get();
 	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
 		len = e[n] & 0x7f;
 		if (n + 1 + len > priv->bl_stride)
 			break;
+		if (!whole && len > 11)
+			continue;	/* the gamma waits for the settle (see bl_update) */
 		if (e[n] & 0x80)
 			s9p_dsim_write_long(priv, e + n + 1, len);
 		else
@@ -337,11 +337,26 @@ static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 			break;
 		}
 	}
+	s9p_hw_trigger_unmask(priv);
 	if (shown < 5) {
 		shown++;
 		dev_info(priv->drm.dev, "brightness level %u sent in %lld us\n", level,
 			 ktime_us_delta(ktime_get(), t0));
 	}
+}
+
+/* brightness has stopped changing: now the whole set, gamma included */
+static void s9p_bl_settle(struct work_struct *work)
+{
+	struct s9p_decon *priv = container_of(to_delayed_work(work),
+					      struct s9p_decon, bl_settle);
+
+	mutex_lock(&priv->panel_lock);
+	if (priv->enabled && priv->bl && priv->bl_table) {
+		s9p_panel_brightness_table(priv, priv->bl->props.brightness, true);
+		priv->bl_sent = priv->bl->props.brightness;
+	}
+	mutex_unlock(&priv->panel_lock);
 }
 
 static ssize_t bl_table_write(struct file *file, struct kobject *kobj,
@@ -437,11 +452,24 @@ edits = [
 		if (priv->bl_table) {
 			if (priv->bl_sent != bl->props.brightness) {
 				unsigned long ready = priv->bl_on_at + msecs_to_jiffies(100);
+				/*
+				 * The gamma (CA) is one 35-byte command, and this
+				 * panel takes it only whole; sent while frames are
+				 * being drawn it can jam the DSIM. So while the level
+				 * keeps changing (a slider dragged) only the short
+				 * packets go, and the whole set follows 200 ms after
+				 * the last change.
+				 */
+				bool busy = time_before(jiffies, priv->bl_last + msecs_to_jiffies(200));
 
 				if (time_before(jiffies, ready))
 					msleep(jiffies_to_msecs(ready - jiffies) + 1);
-				s9p_panel_brightness_table(priv, bl->props.brightness);
-				priv->bl_sent = bl->props.brightness;
+				s9p_panel_brightness_table(priv, bl->props.brightness, !busy);
+				priv->bl_sent = busy ? -1 : bl->props.brightness;
+				priv->bl_last = jiffies;
+				if (busy)
+					mod_delayed_work(system_wq, &priv->bl_settle,
+							 msecs_to_jiffies(200));
 			}
 		} else {
 			s9p_panel_brightness(priv, bl->props.brightness);
@@ -453,20 +481,26 @@ edits = [
 		s9p_panel_brightness(priv, priv->bl->props.brightness);
 	s9p_panel_on(priv);""",
      """	if (priv->bl && priv->bl_table) {
-		s9p_panel_brightness_table(priv, priv->bl->props.brightness);
+		s9p_panel_brightness_table(priv, priv->bl->props.brightness, true);
 		priv->bl_sent = priv->bl->props.brightness;
 	} else if (priv->bl) {
 		s9p_panel_brightness(priv, priv->bl->props.brightness);
 	}
 	s9p_panel_on(priv);
 	priv->bl_on_at = jiffies;"""),
-    # asleep: nothing is on the panel any more
+    # asleep: nothing is on the panel any more (and no settle to come)
+    ("""	mutex_lock(&priv->panel_lock);
+	priv->enabled = false;	/* no brightness to a panel going to sleep */""",
+     """	cancel_delayed_work_sync(&priv->bl_settle);
+	mutex_lock(&priv->panel_lock);
+	priv->enabled = false;	/* no brightness to a panel going to sleep */"""),
     ("""	priv->enabled = false;	/* no brightness to a panel going to sleep */""",
      """	priv->enabled = false;	/* no brightness to a panel going to sleep */
 	priv->bl_sent = -1;"""),
     ("""	mutex_init(&priv->panel_lock);
 """, """	mutex_init(&priv->panel_lock);
 	priv->bl_sent = -1;
+	INIT_DELAYED_WORK(&priv->bl_settle, s9p_bl_settle);
 """),
     # the files, once the device is up
     ("""	s9p_backlight_init(priv, &pdev->dev);""",

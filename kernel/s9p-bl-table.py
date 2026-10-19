@@ -478,11 +478,17 @@ def level_packets(level, gamma, aor, elvss_temp0):
                                   (6, [ACL_OPR_TABLE[ACL_OPR]])])
     pk += packet(ACL_DIM_FRM, ACL_DIM_FRM_OFS)
     pk += packet(ACL_ONOFF, 0, [(1, [ACL_ONOFF_TABLE[ACL_PWRSAVE]])])
-    pk += packet(IRC_VALUE, IRC_VALUE_OFS, [(1, irc),
-                                            (2, [IRC_MODE_TABLE[IRC_MODE]])])
-    pk += packet(IRC_ON)
-    pk += packet(POC_COMP1, POC_COMP1_OFS)
-    pk += packet(POC_COMP2, POC_COMP2_OFS, [(1, list(POC_COMP_TABLE[idx]))])
+    # Not IRC (B8) or POC (B1 at 06, B8 at 53): Samsung's per-panel
+    # compensation, tuned to calibration this port does not read, turned
+    # the whole screen green (white text green, blue tiles green). The
+    # panel keeps the bootloader's values for them, and the colours are
+    # right.
+    if WITH_IRC_POC:
+        pk += packet(IRC_VALUE, IRC_VALUE_OFS, [(1, irc),
+                                                (2, [IRC_MODE_TABLE[IRC_MODE]])])
+        pk += packet(IRC_ON)
+        pk += packet(POC_COMP1, POC_COMP1_OFS)
+        pk += packet(POC_COMP2, POC_COMP2_OFS, [(1, list(POC_COMP_TABLE[idx]))])
     pk += packet(GAMMA_UPDATE_ENABLE)
     pk += packet(KEY2_DISABLE)
     return pk, brightness, step, idx
@@ -503,27 +509,30 @@ def build(regs, variant):
 # being drawn (a brightness slider dragged), jams the link and the panel
 # takes no frame after it; 11-byte packets go through. F7 03 still latches
 # the pieces together. A B0 already in front of a packet adds to its offsets.
-CHUNK = 10
+CHUNK = 34	# the gamma goes whole: written in pieces it came out tinted
+WITH_IRC_POC = False	# see level_packets
 
 
 def split_long(pk):
+    """the packets as this panel takes them: long ones in pieces, and the
+    B0 offset put back to 0 after the packet it was for. On this panel the
+    offset stays until changed (Samsung's driver could leave it, the
+    S6E3HA8 in this phone does not let it go): left at 0x16 after the ELVSS
+    temperature byte, every write after it landed 0x16 bytes on and the
+    screen went blue and green."""
     out, base = [], 0
     for p in pk:
         p = list(p)
         if p[0] == 0xB0 and len(p) == 2:
-            base = p[1]		# the offset for the next packet only
-            out.append(p)
+            base = p[1]		# for the next packet
             continue
-        if len(p) - 1 > CHUNK:
-            if base:
-                out.pop()	# its B0 is replaced by one per piece
-            data = p[1:]
-            for ofs in range(0, len(data), CHUNK):
-                if base + ofs:
-                    out.append([0xB0, base + ofs])
-                out.append([p[0]] + data[ofs:ofs + CHUNK])
-        else:
-            out.append(p)
+        data = p[1:]
+        for ofs in range(0, max(len(data), 1), CHUNK):
+            if base + ofs:
+                out.append([0xB0, base + ofs])
+            out.append([p[0]] + data[ofs:ofs + CHUNK])
+        if base or len(data) > CHUNK:
+            out.append([0xB0, 0x00])
         base = 0
     return out
 
@@ -533,11 +542,10 @@ def serialise(levels):
     for pk, *_ in levels:
         e = bytearray()
         for p in split_long(pk):
-            # bit 7 of the length: send as a DCS long write even when short,
-            # as the vendor's mipi_write does for every 2-byte packet but
-            # the B0 offsets (which go as short writes with a parameter)
-            assert 1 <= len(p) <= 127
-            e.append(len(p) | (0x80 if len(p) == 2 and p[0] != 0xB0 else 0))
+            # every packet of 1-2 bytes goes as a short write: sent long,
+            # F7 03 left the panel dark after its next sleep
+            assert 1 <= len(p) <= CHUNK + 1
+            e.append(len(p))
             e += bytes(p)
         e.append(0)
         entries.append(e)
