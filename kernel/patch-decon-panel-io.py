@@ -28,7 +28,9 @@ changes:
 
 bl_table: "S9BT", u16 levels, u16 stride (little-endian), then `levels`
 entries of `stride` bytes; each entry is packets as [u8 length][bytes],
-ended by a zero length, sent verbatim (the keys and F7 03 included). All
+ended by a zero length, sent verbatim (the keys and F7 03 included). Bit 7
+of a length sends that packet as a DCS long write even if it is short, as
+Samsung's driver sends every 2-byte packet but its B0 offsets. All
 three are root's only. Applied after patch-decon-panel-lock.py.
 """
 import sys
@@ -257,20 +259,50 @@ static DEVICE_ATTR_WO(panel_cmd);
 
 /* ------------------------------------------------- the brightness table */
 
+/* a DCS long write whatever its length (s9p_dsim_write sends 1-2 bytes short) */
+static void s9p_dsim_write_long(struct s9p_decon *priv, const u8 *data, size_t len)
+{
+	u32 v, word = 0;
+	size_t i;
+
+	if (!priv->dsim || !s9p_panel_dcs || !len)
+		return;
+	writel_relaxed(DSIM_INTSRC_PH_FIFO_EMPTY, priv->dsim + DSIM_INTSRC);
+	for (i = 0; i < len; i++) {
+		word |= (u32)data[i] << (8 * (i % 4));
+		if (i % 4 == 3 || i == len - 1) {
+			writel_relaxed(word, priv->dsim + DSIM_PAYLOAD);
+			word = 0;
+		}
+	}
+	writel_relaxed(DSIM_PKTHDR_ID(MIPI_DCS_LONG_WRITE) |
+		       DSIM_PKTHDR_DATA0(len & 0xff) | DSIM_PKTHDR_DATA1(len >> 8),
+		       priv->dsim + DSIM_PKTHDR);
+	if (readl_poll_timeout_atomic(priv->dsim + DSIM_INTSRC, v,
+				      v & DSIM_INTSRC_PH_FIFO_EMPTY, 10, 20000))
+		dev_warn_once(priv->drm.dev, "panel did not take DCS %02x\n", data[0]);
+}
+
 /* the level's packets, verbatim; caller holds panel_lock, panel enabled */
 static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level)
 {
 	const u8 *e;
-	unsigned int n;
+	unsigned int n, len;
 
 	if (level >= priv->bl_levels)
 		level = priv->bl_levels - 1;
 	e = priv->bl_table + (size_t)level * priv->bl_stride;
 	s9p_hw_trigger_mask(priv);
 	s9p_wait_shadow_idle(priv);
-	for (n = 0; n < priv->bl_stride && e[n] && n + 1 + e[n] <= priv->bl_stride;
-	     n += e[n] + 1)
-		s9p_dsim_write(priv, e + n + 1, e[n]);
+	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
+		len = e[n] & 0x7f;
+		if (n + 1 + len > priv->bl_stride)
+			break;
+		if (e[n] & 0x80)
+			s9p_dsim_write_long(priv, e + n + 1, len);
+		else
+			s9p_dsim_write(priv, e + n + 1, len);
+	}
 	s9p_hw_trigger_unmask(priv);
 }
 
