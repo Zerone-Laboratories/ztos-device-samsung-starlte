@@ -1,0 +1,121 @@
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/dma-mapping.h>
++#include <linux/gfp.h>
+ #include <linux/delay.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+@@ -1215,6 +1217,48 @@
+ 	vb2_dma_contig_clear_max_seg_size(mfc_dev->mem_dev[BANK_R_CTX]);
+ }
+ 
++/*
++ * MFC v12 addresses every buffer from the firmware's base (RISC_BASE_ADDRESS)
++ * and fails a stream buffer that lies below it (error 0x37 at the sequence
++ * header). Without an IOMMU the firmware sits in CMA like every frame and
++ * stream buffer, so any buffer that lands in a hole further down fails: on
++ * the Exynos 9810 that was every video below about 1024x576. Put the
++ * firmware under all of CMA instead: alloc_contig_pages() takes the lowest
++ * free range of ZONE_DMA, which is ordinary RAM below the CMA area.
++ */
++static int s5p_mfc_alloc_low_firmware(struct s5p_mfc_dev *mfc_dev)
++{
++	struct device *dev = &mfc_dev->plat_dev->dev;
++	struct s5p_mfc_priv_buf *fw = &mfc_dev->fw_buf;
++	unsigned long nr = mfc_dev->variant->buf_size->fw >> PAGE_SHIFT;
++	struct page *page;
++	dma_addr_t dma;
++
++	page = alloc_contig_pages(nr, GFP_KERNEL | __GFP_DMA | __GFP_NOWARN,
++				  numa_mem_id(), NULL);
++	if (!page)
++		return -ENOMEM;
++	dma = dma_map_page(dev, page, 0, nr << PAGE_SHIFT, DMA_TO_DEVICE);
++	if (dma_mapping_error(dev, dma)) {
++		free_contig_range(page_to_pfn(page), nr);
++		return -ENOMEM;
++	}
++	if (dma >= mfc_dev->mem_base) {
++		/* no lower than the context buffers: no use */
++		dma_unmap_page(dev, dma, nr << PAGE_SHIFT, DMA_TO_DEVICE);
++		free_contig_range(page_to_pfn(page), nr);
++		return -ERANGE;
++	}
++	fw->low_page = page;
++	fw->virt = page_address(page);
++	fw->dma = dma;
++	fw->size = nr << PAGE_SHIFT;
++	mfc_dev->dma_base[BANK_L_CTX] = dma;
++	mfc_dev->dma_base[BANK_R_CTX] = dma;
++	dev_info(dev, "firmware at %pad, below every buffer\n", &dma);
++	return 0;
++}
++
+ static int s5p_mfc_configure_common_memory(struct s5p_mfc_dev *mfc_dev)
+ {
+ 	struct device *dev = &mfc_dev->plat_dev->dev;
+@@ -1255,7 +1299,9 @@
+ 	}
+ 
+ 	/* Firmware allocation cannot fail in this case */
+-	s5p_mfc_alloc_firmware(mfc_dev);
++	if (!IS_MFCV12(mfc_dev) || exynos_is_iommu_available(dev) ||
++	    s5p_mfc_alloc_low_firmware(mfc_dev))
++		s5p_mfc_alloc_firmware(mfc_dev);
+ 
+ 	mfc_dev->mem_dev[BANK_L_CTX] = mfc_dev->mem_dev[BANK_R_CTX] = dev;
+ 	vb2_dma_contig_set_max_seg_size(dev, DMA_BIT_MASK(32));
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_ctrl.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/dma-mapping.h>
+ #include <linux/err.h>
+ #include <linux/firmware.h>
+ #include <linux/jiffies.h>
+@@ -81,6 +82,9 @@
+ 		return -ENOMEM;
+ 	}
+ 	memcpy(dev->fw_buf.virt, fw_blob->data, fw_blob->size);
++	if (dev->fw_buf.low_page)	/* cached memory: out to RAM for the MFC */
++		dma_sync_single_for_device(&dev->plat_dev->dev, dev->fw_buf.dma,
++					   dev->fw_buf.size, DMA_TO_DEVICE);
+ 	wmb();
+ 	dev->fw_get_done = true;
+ 	release_firmware(fw_blob);
+@@ -93,7 +97,18 @@
+ {
+ 	/* Before calling this function one has to make sure
+ 	 * that MFC is no longer processing */
+-	s5p_mfc_release_priv_buf(dev, &dev->fw_buf);
++	if (dev->fw_buf.low_page) {
++		dma_unmap_page(&dev->plat_dev->dev, dev->fw_buf.dma,
++			       dev->fw_buf.size, DMA_TO_DEVICE);
++		free_contig_range(page_to_pfn(dev->fw_buf.low_page),
++				  dev->fw_buf.size >> PAGE_SHIFT);
++		dev->fw_buf.low_page = NULL;
++		dev->fw_buf.virt = NULL;
++		dev->fw_buf.dma = 0;
++		dev->fw_buf.size = 0;
++	} else {
++		s5p_mfc_release_priv_buf(dev, &dev->fw_buf);
++	}
+ 	dev->fw_get_done = false;
+ 	return 0;
+ }
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+@@ -251,6 +251,7 @@
+ 	dma_addr_t	dma;
+ 	size_t		size;
+ 	unsigned int	ctx;
++	struct page	*low_page;	/* v12 firmware below CMA, see s5p_mfc.c */
+ };
+ 
+ /**

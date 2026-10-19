@@ -13,6 +13,13 @@ export PATH=$B/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-g
 export LC_ALL=C ARCH=arm64 CROSS_COMPILE=aarch64-none-linux-gnu- KBUILD_MODPOST_WARN=1
 quiet() { grep -E "error|warning: [a-z]" || true; }
 
+# fixes to mainline s5p-mfc for the 9810's v12 (patches/), applied once
+for p in "$ROOT"/media/patches/*.patch; do
+	if patch -d "$K" -p1 -N --dry-run -s < "$p" >/dev/null 2>&1; then
+		patch -d "$K" -p1 -N -s < "$p"
+	fi
+done
+
 if [ ! -f "$K/out-media/.config" ]; then
 	mkdir -p "$K/out-media" && cp "$K/out/.config" "$K/out-media/.config"
 	(cd "$K" && scripts/config --file out-media/.config -m MEDIA_SUPPORT -d MEDIA_SUPPORT_FILTER \

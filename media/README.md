@@ -16,11 +16,27 @@ image is not touched.
 | clocks | CMU_TOP `MFC_BUS`: mux 1, div /1, gate automatic. CMU_MFC: user mux bit 4, BUSP /4, Q-channels set. All left on by the bootloader. |
 | TrustZone | Non-secure access works after boot (no SMC needed until the domain is power-cycled; then `SMC 0x82000410` with `0x17810204`, as for G3D). |
 | firmware | `/vendor/firmware/mfc_fw.bin` from the stock `vendor.img` (727 280 bytes, dated 2018-12-17). Installed as `/lib/firmware/s5p-mfc-v12.fw`. |
-| memory | No IOMMU yet: 8 MiB of CMA for firmware and contexts, and CMA for frames (vb2-dma-contig). |
+| memory | No IOMMU yet. Contexts come from 8 MiB of CMA, frames and stream buffers from CMA (vb2-dma-contig), and the firmware from 1 MiB of plain RAM below CMA (see the patch). |
+
+## The firmware must sit below every buffer
+
+MFC v12 addresses buffers from the firmware's base (`RISC_BASE_ADDRESS`).
+It fails a stream buffer that lies below the base with `Interrupt Error:
+00000037` on the sequence header.
+
+Mainline's single-port mode puts the firmware in CMA, at whatever address
+CMA gives it. A later buffer that lands in a hole further down then fails.
+Here the firmware landed at 0x9e700000, and GStreamer's smaller stream
+buffers (sized by resolution) fitted into a hole at 0x99280000. So every
+video under about 1024x576 failed, YouTube's 360p and 480p among them.
+
+`patches/s5p-mfc-v12-firmware-below-cma.patch` moves the firmware to
+`alloc_contig_pages(GFP_DMA)`: the lowest free 1 MiB of RAM (0x80800000),
+under all of CMA. `build.sh` applies the patch to the kernel tree once.
 
 ## Steps
 
-1. Run `./build.sh`. It builds `out-media` (the flashed config plus V4L2 and
+1. Run `./build.sh`. It applies `patches/` and builds `out-media` (the flashed config plus V4L2 and
    s5p-mfc as modules; nothing built-in changes) and the overlay loader.
    Output goes to `modules/`.
 2. On the phone, as root:
@@ -48,10 +64,6 @@ overlay is built without `-@`.
 
 ## Not yet
 
-- **WebKit playback.** On YouTube the MFC raised `Interrupt Error: 00000037`
-  mid-stream and the page loaded forever, so ztbrowser ranks the v4l2
-  decoders `NONE` for now. A clean file decodes fine; the difference is
-  probably YouTube's MSE stream (resolution switches, or the level/profile).
 - **Power domain driver:** cutting MFC power when idle and restoring it, with
   the SMC and the CMU_MFC restore. Until then MFC stays on as the bootloader
   left it.
