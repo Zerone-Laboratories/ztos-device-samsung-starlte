@@ -676,11 +676,14 @@ def selftest():
                 rows_ok = False
         want = ((0xF0, 3), (0xCA, 35), (0xB1, 3), (0xB5, 4), (0xB0, 2),
                 (0xB5, 2), (0xF4, 3), (0xB4, 7), (0xB0, 2), (0xB4, 2),
-                (0x55, 2), (0xB0, 2), (0xB8, 18), (0xB8, 2), (0xB0, 2),
-                (0xB1, 11), (0xB0, 2), (0xB8, 3), (0xF7, 2), (0xF0, 3))
-        check(shapes == {want}, "%s: every level is the vendor's 15 "
-              "packets plus 5 B0 offsets, lengths as the vendor arrays"
-              % variant)
+                (0x55, 2))
+        if WITH_IRC_POC:
+            want += ((0xB0, 2), (0xB8, 18), (0xB8, 2), (0xB0, 2),
+                     (0xB1, 11), (0xB0, 2), (0xB8, 3))
+        want += ((0xF7, 2), (0xF0, 3))
+        check(shapes == {want}, "%s: every level is the vendor's packets "
+              "(%d with their B0 offsets), lengths as the vendor arrays"
+              % (variant, len(want)))
         check(aor_ok, "%s: level i sends B1 star_a3_%s_aor_table[i], "
               "i = its PAC step" % (variant, variant))
         check(nits_ok, "%s: nits never go down (row and interpolated)"
