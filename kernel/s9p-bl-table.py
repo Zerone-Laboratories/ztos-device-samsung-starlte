@@ -511,6 +511,8 @@ def build(regs, variant):
 # the pieces together. A B0 already in front of a packet adds to its offsets.
 CHUNK = 34	# the gamma goes whole: written in pieces it came out tinted
 WITH_IRC_POC = False	# see level_packets
+OFFSET_WRITES = False	# see split_long
+VENDOR_WRITES = True	# see vendor_packets; split_long is the old way
 
 
 def split_long(pk):
@@ -521,10 +523,20 @@ def split_long(pk):
     temperature byte, every write after it landed 0x16 bytes on and the
     screen went blue and green."""
     out, base = [], 0
-    for p in pk:
+    for n, p in enumerate(pk):
         p = list(p)
         if p[0] == 0xB0 and len(p) == 2:
             base = p[1]		# for the next packet
+            continue
+        if base and not OFFSET_WRITES:
+            # written at an offset through B0: left out. The ELVSS
+            # temperature byte (B5 at 0x16) is the panel's own value at
+            # 25 C already, and the ACL dimming frames (B4 at 0x0F) only
+            # matter with ACL on. A B0 that does not reach the panel
+            # leaves its offset in place, and every write after it lands
+            # that far on, into bytes no later level rewrites: the colours
+            # stayed wrong (red, green) until the next boot.
+            base = 0
             continue
         data = p[1:]
         for ofs in range(0, max(len(data), 1), CHUNK):
@@ -533,7 +545,28 @@ def split_long(pk):
             out.append([p[0]] + data[ofs:ofs + CHUNK])
         if base or len(data) > CHUNK:
             out.append([0xB0, 0x00])
+        if n == 0:
+            # after the key: offset 0, whatever an earlier change left
+            out.append([0xB0, 0x00])
         base = 0
+    return out
+
+
+def vendor_packets(pk):
+    """the packets exactly as Samsung's mipi_write sends them: a B0 offset
+    as a DCS short write with its parameter, anything else of two bytes or
+    more as a DCS long write (F7 03 and 55 00 included), and no B0 00 after
+    an offset (the panel takes an offset for the next command only).
+
+    Sent the other way (2-byte commands short, B0 00 after each offset)
+    the panel kept only the first two bytes of the next gamma: green and
+    blue at the top went to zero, and the screen stayed red until a reboot
+    (2026-10-19, webcam and a CA readback)."""
+    out = []
+    for p in pk:
+        p = list(p)
+        short = (p[0] == 0xB0 and len(p) == 2) or len(p) == 1
+        out.append((p, not short))
     return out
 
 
@@ -541,11 +574,10 @@ def serialise(levels):
     entries = []
     for pk, *_ in levels:
         e = bytearray()
-        for p in split_long(pk):
-            # every packet of 1-2 bytes goes as a short write: sent long,
-            # F7 03 left the panel dark after its next sleep
-            assert 1 <= len(p) <= CHUNK + 1
-            e.append(len(p))
+        for p, long_ in (vendor_packets(pk) if VENDOR_WRITES else
+                         ((q, False) for q in split_long(pk))):
+            assert 1 <= len(p) <= 0x7F
+            e.append(len(p) | (0x80 if long_ else 0))
             e += bytes(p)
         e.append(0)
         entries.append(e)
@@ -699,7 +731,9 @@ def selftest():
         check(top == centres, "%s: zero MTP, 400 nits gives the centres "
               "07 00 00 00 80.. 00 00 00 (got %s)" % (variant, hexs(top)))
         blob, stride = serialise(levels)
-        check(parse_table(blob) == [split_long(pk) for pk, *_ in levels],
+        sent = [[p for p, _ in vendor_packets(pk)] if VENDOR_WRITES else
+                split_long(pk) for pk, *_ in levels]
+        check(parse_table(blob) == sent,
               "%s: table reads back as sent (stride %d, %d bytes)"
               % (variant, stride, len(blob)))
     # the vendor's own CA default is not a computed gamma: 07 80 80 80 ..

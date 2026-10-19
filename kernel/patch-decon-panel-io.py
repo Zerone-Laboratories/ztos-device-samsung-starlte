@@ -305,27 +305,39 @@ static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 	const u8 *e;
 	unsigned int n, len;
 	ktime_t t0;
+	u32 v;
 
 	if (level >= priv->bl_levels)
 		level = priv->bl_levels - 1;
 	e = priv->bl_table + (size_t)level * priv->bl_stride;
 	/*
-	 * With the frame trigger held off, as the AOR path sends: sent with
-	 * frames running, the panel came out of its next sleep dark. The hold
-	 * stays short because no packet is long (s9p-bl-table.py splits the
-	 * gamma and IRC into pieces of 10 bytes): a 35-byte command sent across
-	 * a frame jammed the DSIM, and a hold as long as a frame ran into its
-	 * 18 ms TE timeout; the whole set takes about 200 us.
+	 * Between two frames, with the frame trigger held off: the mask stops
+	 * the next frame, and the DECON going idle shows the one already on its
+	 * way has gone. Sent while a frame was going out, the packets waited
+	 * behind it (10 ms) and a B0 offset reset was lost now and then: the
+	 * panel's offset stays until changed, so the gamma after it landed in
+	 * the wrong place and black came out green. The set itself takes well
+	 * under a millisecond, so the hold stays inside the DSIM's 18 ms TE
+	 * timeout; the long gamma only goes when the level has settled (see
+	 * bl_update), the rest are 11 bytes or less.
 	 */
 	s9p_hw_trigger_mask(priv);
 	s9p_wait_shadow_idle(priv);
+	readl_poll_timeout(priv->decon + DECON_GLOBAL_CONTROL, v,
+			   v & DECON_GLOBAL_IDLE_STATUS, 20, 17000);
 	t0 = ktime_get();
 	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
 		len = e[n] & 0x7f;
 		if (n + 1 + len > priv->bl_stride)
 			break;
-		if (!whole && len > 11)
-			continue;	/* the gamma waits for the settle (see bl_update) */
+		/* while the level keeps changing (a slider dragged) only AOR goes,
+		 * between the keys and latched by F7 03, as the old AOR path sent
+		 * it: sent over and over, the ELVSS, VINT and ACL writes and their
+		 * B0 offsets left the panel's colours wrong (black came out green).
+		 * The whole set follows once the level has settled (bl_update). */
+		if (!whole && e[n + 1] != 0xF0 && e[n + 1] != 0xF7 &&
+		    !(e[n + 1] == 0xB1 && len == 3))
+			continue;
 		if (e[n] & 0x80)
 			s9p_dsim_write_long(priv, e + n + 1, len);
 		else
