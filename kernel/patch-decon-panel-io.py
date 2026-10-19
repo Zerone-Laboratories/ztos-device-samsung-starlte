@@ -53,6 +53,12 @@ edits = [
 #define DSIM_RXFIFO			0x0060
 #define DSIM_FIFOCTRL			0x0068
 #define  DSIM_FIFOCTRL_EMPTY_RX		BIT(12)
+#define  DSIM_FIFOCTRL_EMPTY_PH_SFR	BIT(10)
+#define  DSIM_INTSRC_FRAME_DONE	BIT(24)
+#define DSIM_DPHY_STATUS		0x001C
+#define  DSIM_DPHY_STOP_STATE_DAT	0xf	/* all four data lanes idle */
+#define DECON_GLOBAL_CONTROL		0x0000
+#define  DECON_GLOBAL_IDLE_STATUS	BIT(5)
 /* DSI packet types for reading (the MIPI ones; this driver has its own
  * MIPI_DCS_* names, which <video/mipi_display.h> would clash with) */
 #define S9P_DSI_MAX_RETURN_SIZE		0x37
@@ -293,14 +299,29 @@ static void s9p_dsim_write_long(struct s9p_decon *priv, const u8 *data, size_t l
 /* the level's packets, verbatim; caller holds panel_lock, panel enabled */
 static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level)
 {
+	static int shown;
 	const u8 *e;
 	unsigned int n, len;
+	ktime_t t0;
+	u32 v;
 
 	if (level >= priv->bl_levels)
 		level = priv->bl_levels - 1;
 	e = priv->bl_table + (size_t)level * priv->bl_stride;
-	s9p_hw_trigger_mask(priv);
-	s9p_wait_shadow_idle(priv);
+	/*
+	 * Twenty packets, the gamma alone 35 bytes, between two frames. This
+	 * DSIM does not keep a command out of a frame transfer by itself: one
+	 * sent across a frame underran it and put the DSIM into its abnormal
+	 * command state, and holding the frame trigger off instead, for as long
+	 * as the set takes, ran into its 18 ms TE timeout. So the set goes
+	 * straight after a frame has gone (FRAME_DONE), in the quiet before
+	 * the next TE; with nothing being drawn no frame comes within 20 ms,
+	 * and then nothing is in the way.
+	 */
+	writel_relaxed(DSIM_INTSRC_FRAME_DONE, priv->dsim + DSIM_INTSRC);
+	readl_poll_timeout(priv->dsim + DSIM_INTSRC, v, v & DSIM_INTSRC_FRAME_DONE,
+			   20, 20000);
+	t0 = ktime_get();
 	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
 		len = e[n] & 0x7f;
 		if (n + 1 + len > priv->bl_stride)
@@ -309,8 +330,18 @@ static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 			s9p_dsim_write_long(priv, e + n + 1, len);
 		else
 			s9p_dsim_write(priv, e + n + 1, len);
+		if (!(readl_relaxed(priv->dsim + DSIM_FIFOCTRL) & DSIM_FIFOCTRL_EMPTY_PH_SFR)) {
+			dev_warn_ratelimited(priv->drm.dev,
+					     "brightness level %u: packet %02x stuck, rest not sent\n",
+					     level, e[n + 1]);
+			break;
+		}
 	}
-	s9p_hw_trigger_unmask(priv);
+	if (shown < 5) {
+		shown++;
+		dev_info(priv->drm.dev, "brightness level %u sent in %lld us\n", level,
+			 ktime_us_delta(ktime_get(), t0));
+	}
 }
 
 static ssize_t bl_table_write(struct file *file, struct kobject *kobj,

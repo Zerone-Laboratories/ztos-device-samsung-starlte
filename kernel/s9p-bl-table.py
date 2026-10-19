@@ -497,11 +497,42 @@ def build(regs, variant):
             for i in range(NR_LEVELS)]
 
 
+# Long commands go in pieces of at most CHUNK data bytes, each at its offset
+# through B0 (the way Samsung writes single B5 bytes): on this phone's DSIM a
+# command of 18 bytes or more (the gamma, 35; IRC, 18), sent while frames are
+# being drawn (a brightness slider dragged), jams the link and the panel
+# takes no frame after it; 11-byte packets go through. F7 03 still latches
+# the pieces together. A B0 already in front of a packet adds to its offsets.
+CHUNK = 10
+
+
+def split_long(pk):
+    out, base = [], 0
+    for p in pk:
+        p = list(p)
+        if p[0] == 0xB0 and len(p) == 2:
+            base = p[1]		# the offset for the next packet only
+            out.append(p)
+            continue
+        if len(p) - 1 > CHUNK:
+            if base:
+                out.pop()	# its B0 is replaced by one per piece
+            data = p[1:]
+            for ofs in range(0, len(data), CHUNK):
+                if base + ofs:
+                    out.append([0xB0, base + ofs])
+                out.append([p[0]] + data[ofs:ofs + CHUNK])
+        else:
+            out.append(p)
+        base = 0
+    return out
+
+
 def serialise(levels):
     entries = []
     for pk, *_ in levels:
         e = bytearray()
-        for p in pk:
+        for p in split_long(pk):
             # bit 7 of the length: send as a DCS long write even when short,
             # as the vendor's mipi_write does for every 2-byte packet but
             # the B0 offsets (which go as short writes with a parameter)
@@ -657,7 +688,7 @@ def selftest():
         check(top == centres, "%s: zero MTP, 400 nits gives the centres "
               "07 00 00 00 80.. 00 00 00 (got %s)" % (variant, hexs(top)))
         blob, stride = serialise(levels)
-        check(parse_table(blob) == [pk for pk, *_ in levels],
+        check(parse_table(blob) == [split_long(pk) for pk, *_ in levels],
               "%s: table reads back as sent (stride %d, %d bytes)"
               % (variant, stride, len(blob)))
     # the vendor's own CA default is not a computed gamma: 07 80 80 80 ..
