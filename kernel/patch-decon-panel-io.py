@@ -75,6 +75,8 @@ edits = [
 	unsigned int bl_levels, bl_stride;
 	u8 *bl_upload;			/* bl_table as it arrives */
 	size_t bl_upload_len;
+	int bl_sent;			/* table level on the panel now; -1 none */
+	unsigned long bl_on_at;		/* jiffies of the last display-on */
 };"""),
 ]
 for a, b in edits:
@@ -354,6 +356,7 @@ static ssize_t bl_table_write(struct file *file, struct kobject *kobj,
 				memcpy(priv->bl_table, grown + 8, total - 8);
 				priv->bl_levels = levels;
 				priv->bl_stride = stride;
+				priv->bl_sent = -1;
 				if (priv->bl) {
 					priv->bl->props.max_brightness = levels - 1;
 					if (priv->bl->props.brightness >= levels)
@@ -393,15 +396,47 @@ static const struct attribute_group s9p_panel_group = {
 s = s.replace(anchor, code + anchor, 1)
 
 edits = [
-    # the backlight sends the table's level when there is one
+    # the backlight sends the table's level when there is one. Not a level
+    # already there (the shell sets it again as the screen comes on), and
+    # not within 100 ms of display-on: a full set (ELVSS above all) sent
+    # while the panel powers up stopped its TE, and every flip after it.
     ("""	if (priv->enabled && !backlight_is_blank(bl))
 		s9p_panel_brightness(priv, bl->props.brightness);""",
      """	if (priv->enabled && !backlight_is_blank(bl)) {
-		if (priv->bl_table)
-			s9p_panel_brightness_table(priv, bl->props.brightness);
-		else
+		if (priv->bl_table) {
+			if (priv->bl_sent != bl->props.brightness) {
+				unsigned long ready = priv->bl_on_at + msecs_to_jiffies(100);
+
+				if (time_before(jiffies, ready))
+					msleep(jiffies_to_msecs(ready - jiffies) + 1);
+				s9p_panel_brightness_table(priv, bl->props.brightness);
+				priv->bl_sent = bl->props.brightness;
+			}
+		} else {
 			s9p_panel_brightness(priv, bl->props.brightness);
+		}
 	}"""),
+    # waking: the level goes in before display-on, as Samsung's init does
+    # (sleep-out reloads the panel's registers from its own memory)
+    ("""	if (priv->bl)
+		s9p_panel_brightness(priv, priv->bl->props.brightness);
+	s9p_panel_on(priv);""",
+     """	if (priv->bl && priv->bl_table) {
+		s9p_panel_brightness_table(priv, priv->bl->props.brightness);
+		priv->bl_sent = priv->bl->props.brightness;
+	} else if (priv->bl) {
+		s9p_panel_brightness(priv, priv->bl->props.brightness);
+	}
+	s9p_panel_on(priv);
+	priv->bl_on_at = jiffies;"""),
+    # asleep: nothing is on the panel any more
+    ("""	priv->enabled = false;	/* no brightness to a panel going to sleep */""",
+     """	priv->enabled = false;	/* no brightness to a panel going to sleep */
+	priv->bl_sent = -1;"""),
+    ("""	mutex_init(&priv->panel_lock);
+""", """	mutex_init(&priv->panel_lock);
+	priv->bl_sent = -1;
+"""),
     # the files, once the device is up
     ("""	s9p_backlight_init(priv, &pdev->dev);""",
      """	s9p_backlight_init(priv, &pdev->dev);
