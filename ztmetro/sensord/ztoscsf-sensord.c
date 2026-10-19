@@ -252,22 +252,32 @@ static void tone(int32_t cct) {
 	}
 }
 
+/* One reading a second. The light is followed in log terms (as the eye
+ * sees it), quickly up and slowly down: walking into sunlight should bring
+ * the screen up within a few seconds, but a hand or a shadow passing over
+ * the sensor should not make it dip. The brightness then moves only when
+ * the room has changed enough to matter (3 points), and there it glides
+ * (see the ramp in main). */
+#define LIGHT_UP	0.35	/* share of a brighter reading taken each second */
+#define LIGHT_DOWN	0.06	/* share of a darker one: about 15 s to settle */
+#define LIGHT_STEP	3	/* percent the goal must move by */
+
 static void light(uint32_t lux) {
-	/* Exponential moving average filter: smooths out jitter, fluctuations, and jumps */
+	double l = log10((double)lux + 1.0);
 	if (lux_smooth < 0) {
-		lux_smooth = lux;
+		lux_smooth = l;
 	} else {
-		/* alpha = 0.25 (gradual rolling adaptation) */
-		lux_smooth = lux_smooth * 0.75 + (double)lux * 0.25;
+		double k = l > lux_smooth ? LIGHT_UP : LIGHT_DOWN;
+		lux_smooth += (l - lux_smooth) * k;
 	}
 	if (!auto_on) {
 		return;
 	}
-	int target = lux_to_percent(lux_smooth);
+	int target = lux_to_percent(pow(10.0, lux_smooth) - 1.0);
 	if (goal < 0) {	/* the first reading since the screen came on: no ramp */
 		goal = target;
 		brightness_show(goal);
-	} else if (abs(target - goal) >= 2) {
+	} else if (abs(target - goal) >= LIGHT_STEP) {
 		goal = target;
 	}
 }
@@ -575,7 +585,7 @@ int main(void) {
 	while (!stopping) {
 		/* awake on a timer only while the brightness is on its way somewhere */
 		bool ramping = auto_on && screen_on && goal >= 0 && shown != goal;
-		if (poll(fds, 2, ramping ? 30 : -1) < 0) {
+		if (poll(fds, 2, ramping ? 40 : -1) < 0) {
 			if (errno == EINTR) {
 				continue;
 			}

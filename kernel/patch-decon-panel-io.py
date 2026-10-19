@@ -124,9 +124,14 @@ static int s9p_dsim_read(struct s9p_decon *priv, u8 reg, u8 *buf, size_t len)
 		rx = readl_relaxed(priv->dsim + DSIM_RXFIFO);
 		switch (rx & 0xff) {
 		case S9P_DSI_RX_ERROR_REPORT:
-			dev_warn(priv->drm.dev, "panel read %02x: error report %04x\n",
-				 reg, (rx >> 8) & 0xffff);
-			return -EIO;
+			/* the panel acknowledges with a report, before or after
+			 * the data; Samsung counts only bits 0-5 and 8-13 as
+			 * errors (MIPI_DSI_ERR_BIT_MASK 0x3f3f): bit 15 comes
+			 * with every read on this panel */
+			if ((rx >> 8) & 0x3f3f)
+				dev_warn(priv->drm.dev, "panel read %02x: error report %04x\n",
+					 reg, (rx >> 8) & 0xffff);
+			break;
 		case S9P_DSI_RX_EOT:
 			break;
 		case S9P_DSI_RX_DCS_SHORT_1:
@@ -158,7 +163,7 @@ static int s9p_dsim_read(struct s9p_decon *priv, u8 reg, u8 *buf, size_t len)
 		}
 	} while (!(readl_relaxed(priv->dsim + DSIM_FIFOCTRL) & DSIM_FIFOCTRL_EMPTY_RX) &&
 		 --depth);
-	return got;
+	return got ? got : -EIO;
 }
 
 static ssize_t panel_read_store(struct device *dev, struct device_attribute *attr,
