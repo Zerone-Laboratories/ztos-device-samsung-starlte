@@ -32,6 +32,7 @@
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
 #include <linux/io.h>
+#include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
 #include <linux/module.h>
@@ -69,6 +70,7 @@ static struct gpiod_lookup_table wake_gpios = {
 	.dev_id = "zrn-bt",
 	.table = {
 		GPIO_LOOKUP("gpg2", 0, "bt-wake", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpa2", 3, "host-wake", GPIO_ACTIVE_HIGH),
 		{ }
 	},
 };
@@ -78,7 +80,8 @@ static struct platform_device *bus_pdev, *uart_pdev, *self;
 static struct i2c_client *exp;
 static struct clk_hw *uart_clk;
 static struct clk_lookup *cl_uart, *cl_baud;
-static struct gpio_desc *bt_wake;
+static struct gpio_desc *bt_wake, *host_wake;
+static int host_wake_irq = -1;
 
 /* what the gates and USI_OPTION were before we forced them, for sleep */
 static u32 saved_gates[ARRAY_SIZE(gates)], saved_option;
@@ -294,12 +297,20 @@ static struct syscore bt_syscore = { .ops = &bt_syscore_ops };
  * off for the sleep (process context: BT_EN is on the I2C expander), on
  * again after. The host stack loses the link; btattach is restarted by its
  * service when the tty goes away. */
-static bool sleep_power_off = true;
+/* Off: the chip stays powered and its links up through the sleep; with the
+ * resume fixes above SoC sleep works so, and HOST_WAKE can wake it. */
+static bool sleep_power_off;
 module_param(sleep_power_off, bool, 0644);
 static bool powered_off_for_sleep;
 
+static bool entering_sleep;	/* see host_wake_isr */
+
 static int bt_pm_notify(struct notifier_block *nb, unsigned long event, void *unused)
 {
+	if (event == PM_SUSPEND_PREPARE)
+		WRITE_ONCE(entering_sleep, true);
+	else if (event == PM_POST_SUSPEND)
+		WRITE_ONCE(entering_sleep, false);
 	if (!sleep_power_off)
 		return NOTIFY_DONE;
 	if (event == PM_SUSPEND_PREPARE) {
@@ -312,6 +323,60 @@ static int bt_pm_notify(struct notifier_block *nb, unsigned long event, void *un
 	return NOTIFY_DONE;
 }
 static struct notifier_block bt_pm_nb = { .notifier_call = bt_pm_notify };
+
+/*
+ * HOST_WAKE (gpa2-3, alive EINT 19): the chip pulses it low when it has
+ * something for the host, once Write_Sleep_Mode (vendor 0xfc27) has turned
+ * its UART sleep on with host_wake_active 0 and pulsed host wake, as stock
+ * (bcm43xx_bluetooth: the bt_host_wake IRQ, wakeup source BT_host_wake). A
+ * wake IRQ: in system sleep it wakes the SoC (with EINT_WAKEUP_MASK bit 19
+ * open in zrn-system-sleep's eint_wake), and keeps it up a second for the
+ * stack to read what came.
+ */
+/* Between PM_SUSPEND_PREPARE and PM_POST_SUSPEND the kernel's own Bluetooth
+ * suspend notifier talks to the chip (scan off, event filters), and every
+ * answer pulses HOST_WAKE: reported as a wakeup event, that aborted every
+ * sleep at its freeze. Not reported then; in the sleep itself the PMU wakes
+ * the SoC on EINT 19 by itself, Linux or not. */
+static irqreturn_t host_wake_isr(int irq, void *data)
+{
+	if (!READ_ONCE(entering_sleep))
+		pm_wakeup_dev_event(&self->dev, 1000, true);
+	return IRQ_HANDLED;
+}
+
+static void host_wake_setup(void)
+{
+	int ret;
+
+	host_wake = gpiod_get(&self->dev, "host-wake", GPIOD_IN);
+	if (IS_ERR(host_wake)) {
+		pr_warn("zrn-bt: no HOST_WAKE: %ld\n", PTR_ERR(host_wake));
+		host_wake = NULL;
+		return;
+	}
+	host_wake_irq = gpiod_to_irq(host_wake);
+	ret = host_wake_irq < 0 ? host_wake_irq :
+		request_irq(host_wake_irq, host_wake_isr, IRQF_TRIGGER_FALLING, "bt-host-wake", NULL);
+	if (ret) {
+		pr_warn("zrn-bt: HOST_WAKE irq: %d\n", ret);
+		host_wake_irq = -1;
+		return;
+	}
+	device_init_wakeup(&self->dev, true);
+	enable_irq_wake(host_wake_irq);
+	pr_info("zrn-bt: HOST_WAKE on irq %d, a wake source\n", host_wake_irq);
+}
+
+static void host_wake_release(void)
+{
+	if (host_wake_irq >= 0) {
+		disable_irq_wake(host_wake_irq);
+		free_irq(host_wake_irq, NULL);
+	}
+	if (host_wake)
+		gpiod_put(host_wake);
+}
 
 /* bisecting what keeps the SoC from sleeping: 1 no UART device, 2 chip left
  * off, 4 pins left alone, 8 clocks left alone, 16 no I2C bus at all */
@@ -360,6 +425,7 @@ static int __init zrn_bt_init(void)
 			pr_warn("zrn-bt: no BT_WAKE: %ld\n", PTR_ERR(bt_wake));
 			bt_wake = NULL;
 		}
+		host_wake_setup();
 	}
 
 	ret = bt_power(false);	/* a clean reset of its Bluetooth side */
@@ -386,6 +452,7 @@ static int __init zrn_bt_init(void)
 err_power:
 	bt_power(false);
 err_exp:
+	host_wake_release();
 	if (bt_wake)
 		gpiod_put(bt_wake);
 	if (!IS_ERR_OR_NULL(self))
@@ -408,6 +475,7 @@ static void __exit zrn_bt_exit(void)
 	clkdev_drop(cl_uart);
 	clk_hw_unregister_fixed_rate(uart_clk);
 	bt_power(false);
+	host_wake_release();
 	if (bt_wake)
 		gpiod_put(bt_wake);
 	platform_device_unregister(self);
