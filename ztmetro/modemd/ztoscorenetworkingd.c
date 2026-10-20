@@ -166,19 +166,31 @@ static void queue_at(const char *fmt, ...)
 	q_len++;
 }
 
+static long write_retry_at;	/* the port refused a write: the modem is not up yet */
+
 static void next_at(void)
 {
-	if (busy || !q_len || at_fd < 0)
+	if (busy || !q_len || at_fd < 0 || ms() < write_retry_at)
 		return;
 	snprintf(sent, sizeof(sent), "%s", queue[q_head]);
-	q_head = (q_head + 1) % MAX_QUEUE;
-	q_len--;
 	char out[620];
 	int n = snprintf(out, sizeof(out), "%s\r", sent);
 	if (write(at_fd, out, n) != n) {
+		/* The port opens as soon as the driver is in, but refuses writes
+		 * (EPERM) until the CP is online, after cbd has booted it: keep the
+		 * command at the head and try again in a second. Dropping it lost
+		 * the whole setup at every start, caller ID and SMS reports with it. */
+		if (errno == EPERM || errno == EAGAIN) {
+			write_retry_at = ms() + 1000;
+			return;
+		}
 		fprintf(stderr, "ztoscorenetworkingd: write %s: %s\n", sent, strerror(errno));
+		q_head = (q_head + 1) % MAX_QUEUE;
+		q_len--;
 		return;
 	}
+	q_head = (q_head + 1) % MAX_QUEUE;
+	q_len--;
 	busy = true;
 	sent_at = ms();
 }
@@ -250,6 +262,7 @@ static int sms_index = -1;	/* the message whose PDU is the next line */
 static char sms_out_number[32];
 static void tell_shell(const char *line);
 static void queue_at(const char *fmt, ...);
+static void at_setup(void);
 
 static void log_line(const char *path, const char *fmt, ...)
 {
@@ -562,6 +575,10 @@ static void on_line(char *l)
 	} else if (!strcmp(l, "RING") || !strncmp(l, "+CRING", 6)) {
 		if (strcmp(now.call, "incoming")) {
 			call_set("incoming", "");
+			/* light the screen and bring the call up (launch is refused on
+			 * the lock screen; the note stays for that) */
+			tell_shell("screen on\n");
+			tell_shell("launch ztphone\n");
 			tell_shell("notify Phone|Incoming call|Open Phone to answer\n");
 		}
 		call_poll_at = 0;
@@ -940,6 +957,7 @@ static void ipc_message(int main_cmd, int sub, int type, const unsigned char *da
 	if (main_cmd == 0x01 && sub == 0x01) {
 		/* the modem has (re)started: whatever was up is not any more */
 		fprintf(stderr, "ztoscorenetworkingd: the modem started\n");
+		at_setup();
 		ctx_up = false;
 		now.data = false;
 		now.ip[0] = 0;
@@ -1167,11 +1185,27 @@ static void wifi_read(void)
 
 /* ---- the loop ------------------------------------------------------------ */
 
+/* what the modem forgets when it restarts: sent at the start and again at
+ * every "modem started" */
+static void at_setup(void)
+{
+	queue_at("ATE0");
+	queue_at("AT+CMEE=2");
+	queue_at("AT+COPS=3,0");	/* the operator by its long name */
+	queue_at("AT+CREG=2");
+	queue_at("AT+CGREG=2");
+	queue_at("AT+CEREG=2");
+	queue_at("AT+CNMI=2,1,0,0,0");	/* new messages reported */
+	queue_at("AT+CLIP=1");		/* and who is calling */
+	queue_at("AT+CMGF=0");
+	queue_at("AT+CMGL=4");		/* whatever came while nobody was listening */
+}
+
 static void poll_state(void)
 {
+	/* (no AT+CESQ: this modem answers it with +CME ERROR: unknown) */
 	queue_at("AT+CPIN?");
 	queue_at("AT+CSQ");
-	queue_at("AT+CESQ");
 	queue_at("AT+COPS?");
 	queue_at("AT+CREG?");
 	queue_at("AT+CGREG?");
@@ -1207,16 +1241,7 @@ int main(void)
 	chmod(CTL, 0666);
 	ctl_fd = open(CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 
-	queue_at("ATE0");
-	queue_at("AT+CMEE=2");
-	queue_at("AT+COPS=3,0");	/* the operator by its long name */
-	queue_at("AT+CREG=2");
-	queue_at("AT+CGREG=2");
-	queue_at("AT+CEREG=2");
-	queue_at("AT+CNMI=2,1,0,0,0");	/* new messages reported */
-	queue_at("AT+CLIP=1");		/* and who is calling */
-	queue_at("AT+CMGF=0");
-	queue_at("AT+CMGL=4");		/* whatever came while nobody was listening */
+	at_setup();
 	poll_state();
 	long next_poll = ms() + PERIOD_S * 1000;
 	wifi_read();
