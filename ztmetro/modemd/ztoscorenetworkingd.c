@@ -225,7 +225,10 @@ static char ctx_ip[48];
 
 static bool airplane_asked;	/* "airplane on" came down the control pipe */
 static bool screen_off;		/* asked less often then: every wake-up costs battery */
+static int silent_polls;	/* polls in a row with the modem not answering (ERROR, or no answer) */
+static bool answered_since_poll;	/* an OK, or a report, came since the last poll */
 #define PERIOD_OFF_S	120
+#define PERIOD_MAX_S	1800	/* a modem that does not answer: asked for this rarely, at most */
 
 /* ---- messages in ----------------------------------------------------------
  *
@@ -468,6 +471,10 @@ static void on_line(char *l)
 		return;
 	}
 	if (final) {
+		/* a modem that is up says OK, or refuses with a CME/CMS code; a dead
+		 * one says a bare ERROR, or nothing */
+		if (!strcmp(l, "OK") || !strncmp(l, "+CME ERROR", 10) || !strncmp(l, "+CMS ERROR", 10))
+			answered_since_poll = true;
 		if (!strncmp(sent, "AT+CLCC", 7) && !strcmp(l, "OK")) {
 			if (!call_seen && now.call[0])
 				call_set("", "");	/* the list is empty: it is over */
@@ -1003,6 +1010,8 @@ static void command(char *l)
 	if (!strcmp(l, "screen off") || !strcmp(l, "screen on")) {
 		/* from zrnperfd: with the screen off nobody is looking at the bars */
 		screen_off = !strcmp(l, "screen off");
+		if (!screen_off)
+			silent_polls = 0;	/* someone is looking: back to the normal rate */
 		return;
 	}
 	if (!strcmp(l, "airplane on"))
@@ -1285,11 +1294,22 @@ int main(void)
 		if (ms() >= next_poll) {
 			if (ipc_log)
 				ipc_send(0x05, 0x01, 2, NULL, 0);	/* while finding out: does it still answer? */
+			/* a modem that stopped answering is asked less and less: each ask
+			 * wakes it and the phone with it, all night, for nothing */
+			silent_polls = answered_since_poll ? 0 : silent_polls + 1;
+			answered_since_poll = false;
 			poll_state();
 			if (!screen_off)
 				wifi_read();	/* (it runs a program: not for a dark screen) */
 			data_names();
-			next_poll = ms() + (screen_off ? PERIOD_OFF_S : PERIOD_S) * 1000;
+			long period = (screen_off ? PERIOD_OFF_S : PERIOD_S) * 1000L;
+			if (silent_polls >= 3) {
+				int doubling = silent_polls - 3 > 4 ? 4 : silent_polls - 3;
+				period = (long)PERIOD_OFF_S * 1000L << doubling;
+				if (period > PERIOD_MAX_S * 1000L)
+					period = PERIOD_MAX_S * 1000L;
+			}
+			next_poll = ms() + period;
 		}
 		if (!busy && !q_len) {
 			data_keep();
