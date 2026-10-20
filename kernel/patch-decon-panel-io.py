@@ -298,8 +298,11 @@ static void s9p_dsim_write_long(struct s9p_decon *priv, const u8 *data, size_t l
 		dev_warn_once(priv->drm.dev, "panel did not take DCS %02x\n", data[0]);
 }
 
-/* the level's packets, verbatim; caller holds panel_lock, panel enabled */
-static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level, bool whole)
+/*
+ * the level's packets, verbatim; caller holds panel_lock, panel enabled.
+ * False when nothing went: a frame was still on its way out.
+ */
+static bool s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int level, bool whole)
 {
 	static int shown;
 	const u8 *e;
@@ -323,8 +326,14 @@ static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 	 */
 	s9p_hw_trigger_mask(priv);
 	s9p_wait_shadow_idle(priv);
-	readl_poll_timeout(priv->decon + DECON_GLOBAL_CONTROL, v,
-			   v & DECON_GLOBAL_IDLE_STATUS, 20, 17000);
+	/* a frame still going out: send nothing. Packets sent across a frame
+	 * (a slider dragged while the screen redraws) broke into the pixels,
+	 * and the panel showed stripes until it slept. The caller tries again. */
+	if (readl_poll_timeout(priv->decon + DECON_GLOBAL_CONTROL, v,
+			       v & DECON_GLOBAL_IDLE_STATUS, 20, 17000)) {
+		s9p_hw_trigger_unmask(priv);
+		return false;
+	}
 	t0 = ktime_get();
 	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
 		len = e[n] & 0x7f;
@@ -355,6 +364,7 @@ static void s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 		dev_info(priv->drm.dev, "brightness level %u sent in %lld us\n", level,
 			 ktime_us_delta(ktime_get(), t0));
 	}
+	return true;
 }
 
 /* brightness has stopped changing: now the whole set, gamma included */
@@ -365,8 +375,10 @@ static void s9p_bl_settle(struct work_struct *work)
 
 	mutex_lock(&priv->panel_lock);
 	if (priv->enabled && priv->bl && priv->bl_table) {
-		s9p_panel_brightness_table(priv, priv->bl->props.brightness, true);
-		priv->bl_sent = priv->bl->props.brightness;
+		if (s9p_panel_brightness_table(priv, priv->bl->props.brightness, true))
+			priv->bl_sent = priv->bl->props.brightness;
+		else	/* the DECON was busy: again shortly */
+			mod_delayed_work(system_wq, &priv->bl_settle, msecs_to_jiffies(20));
 	}
 	mutex_unlock(&priv->panel_lock);
 }
@@ -476,12 +488,13 @@ edits = [
 
 				if (time_before(jiffies, ready))
 					msleep(jiffies_to_msecs(ready - jiffies) + 1);
-				s9p_panel_brightness_table(priv, bl->props.brightness, !busy);
-				priv->bl_sent = busy ? -1 : bl->props.brightness;
+				bool sent = s9p_panel_brightness_table(priv, bl->props.brightness, !busy);
+
+				priv->bl_sent = (busy || !sent) ? -1 : bl->props.brightness;
 				priv->bl_last = jiffies;
-				if (busy)
+				if (busy || !sent)
 					mod_delayed_work(system_wq, &priv->bl_settle,
-							 msecs_to_jiffies(200));
+							 msecs_to_jiffies(busy ? 200 : 20));
 			}
 		} else {
 			s9p_panel_brightness(priv, bl->props.brightness);
@@ -493,8 +506,9 @@ edits = [
 		s9p_panel_brightness(priv, priv->bl->props.brightness);
 	s9p_panel_on(priv);""",
      """	if (priv->bl && priv->bl_table) {
-		s9p_panel_brightness_table(priv, priv->bl->props.brightness, true);
-		priv->bl_sent = priv->bl->props.brightness;
+		/* no frames before display-on: this one goes */
+		if (s9p_panel_brightness_table(priv, priv->bl->props.brightness, true))
+			priv->bl_sent = priv->bl->props.brightness;
 	} else if (priv->bl) {
 		s9p_panel_brightness(priv, priv->bl->props.brightness);
 	}
