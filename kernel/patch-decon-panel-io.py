@@ -334,6 +334,12 @@ static bool s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 		s9p_hw_trigger_unmask(priv);
 		return false;
 	}
+	if (readl_poll_timeout_atomic(priv->dsim + DSIM_DPHY_STATUS, v,
+				      (v & DSIM_DPHY_STOP_STATE_DAT) == DSIM_DPHY_STOP_STATE_DAT,
+				      10, 5000)) {
+		s9p_hw_trigger_unmask(priv);
+		return false;
+	}
 	t0 = ktime_get();
 	for (n = 0; n < priv->bl_stride && e[n]; n += len + 1) {
 		len = e[n] & 0x7f;
@@ -351,13 +357,13 @@ static bool s9p_panel_brightness_table(struct s9p_decon *priv, unsigned int leve
 			s9p_dsim_write_long(priv, e + n + 1, len);
 		else
 			s9p_dsim_write(priv, e + n + 1, len);
-		if (!(readl_relaxed(priv->dsim + DSIM_FIFOCTRL) & DSIM_FIFOCTRL_EMPTY_PH_SFR)) {
-			dev_warn_ratelimited(priv->drm.dev,
-					     "brightness level %u: packet %02x stuck, rest not sent\n",
-					     level, e[n + 1]);
-			break;
-		}
+		readl_poll_timeout_atomic(priv->dsim + DSIM_DPHY_STATUS, v,
+					  (v & DSIM_DPHY_STOP_STATE_DAT) == DSIM_DPHY_STOP_STATE_DAT,
+					  10, 5000);
 	}
+	readl_poll_timeout_atomic(priv->dsim + DSIM_DPHY_STATUS, v,
+				  (v & DSIM_DPHY_STOP_STATE_DAT) == DSIM_DPHY_STOP_STATE_DAT,
+				  10, 5000);
 	s9p_hw_trigger_unmask(priv);
 	if (shown < 5) {
 		shown++;
@@ -484,17 +490,14 @@ edits = [
 				 * packets go, and the whole set follows 200 ms after
 				 * the last change.
 				 */
-				bool busy = time_before(jiffies, priv->bl_last + msecs_to_jiffies(200));
-
 				if (time_before(jiffies, ready))
 					msleep(jiffies_to_msecs(ready - jiffies) + 1);
-				bool sent = s9p_panel_brightness_table(priv, bl->props.brightness, !busy);
+				s9p_panel_brightness_table(priv, bl->props.brightness, false);
 
-				priv->bl_sent = (busy || !sent) ? -1 : bl->props.brightness;
+				priv->bl_sent = -1;
 				priv->bl_last = jiffies;
-				if (busy || !sent)
-					mod_delayed_work(system_wq, &priv->bl_settle,
-							 msecs_to_jiffies(busy ? 200 : 20));
+				mod_delayed_work(system_wq, &priv->bl_settle,
+						 msecs_to_jiffies(400));
 			}
 		} else {
 			s9p_panel_brightness(priv, bl->props.brightness);

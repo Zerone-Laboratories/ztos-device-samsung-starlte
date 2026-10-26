@@ -1,0 +1,10 @@
+[Unit]
+Description=Processor idle states: forget a failed load and load again (Devices and Services, restart)
+# Never at boot: only when someone asks for it. zrn-cpuidle.service refuses
+# to load after a boot that froze or was cut off while the module was new
+# (the mark in /var/lib/zrn-cpuidle); this is the way past that from the app.
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zrn-cpuidle reset

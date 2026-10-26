@@ -320,6 +320,11 @@ static int sleep_finisher(unsigned long state)
 	for (i = 0; i < 16; i++)
 		pending_before[i] = readl_relaxed(mapped_base(0x10100000) + 0x1200 + i * 4) & readl_relaxed(mapped_base(0x10100000) + 0x1100 + i * 4);
 	mif_requests_before = (readl_relaxed(mapped_base(0x02040000) + 0xf8ac) >> 16) & 0xff;
+	/* Keep this before enabling the MIF gate: retained console records must
+	 * distinguish a missing AP request from corruption of earlier log text. */
+	pr_info("zrn-system-sleep: handoff mif_sleep=%u requests=%02x gate=%u\n",
+		mif_sleep, mif_requests_before,
+		readl_relaxed(mapped_base(0x02040000) + 0xf95c));
 	/* Keep the enable/SMC/abort-disable instructions in one cache line.
 	 * x19 is preserved by the secure-call ABI. Do not call or delay in
 	 * the interval where ACPM is permitted to remove DRAM power. */

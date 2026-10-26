@@ -466,18 +466,21 @@ def level_packets(level, gamma, aor, elvss_temp0):
     irc = list(IRC_PREFIX) + list(IRC_ROWS[step])
     pk = []
     pk += packet(KEY2_ENABLE)
-    pk += packet(GAMMA, 0, [(1, gamma[lum])])
+    if WITH_GAMMA:
+        pk += packet(GAMMA, 0, [(1, gamma[lum])])
     pk += packet(AOR, 0, [(1, list(aor[step]))])
-    pk += packet(TSET_MPS_ELVSS, 0, [(1, [tset]), (2, [mps]),
-                                     (3, [ELVSS_OVER_ZERO[idx]])])
-    # init_elvss_temp_table() fills every normal row with the OTP byte
-    pk += packet(ELVSS_TEMP, ELVSS_TEMP_OFS, [(1, [elvss_temp0])])
-    pk += packet(VGH_VINT, 0, [(2, [VINT_OVER_ZERO[idx]])])
-    pk += packet(ACL_CONTROL, 0, [(2, [ACL_FRAME_AVG_TABLE[ACL_PWRSAVE]]),
-                                  (3, list(ACL_START_POINT_TABLE[0])),
-                                  (6, [ACL_OPR_TABLE[ACL_OPR]])])
-    pk += packet(ACL_DIM_FRM, ACL_DIM_FRM_OFS)
-    pk += packet(ACL_ONOFF, 0, [(1, [ACL_ONOFF_TABLE[ACL_PWRSAVE]])])
+    if WITH_ELVSS_VINT:
+        pk += packet(TSET_MPS_ELVSS, 0, [(1, [tset]), (2, [mps]),
+                                         (3, [ELVSS_OVER_ZERO[idx]])])
+        # init_elvss_temp_table() fills every normal row with the OTP byte
+        pk += packet(ELVSS_TEMP, ELVSS_TEMP_OFS, [(1, [elvss_temp0])])
+        pk += packet(VGH_VINT, 0, [(2, [VINT_OVER_ZERO[idx]])])
+    if WITH_ACL:
+        pk += packet(ACL_CONTROL, 0, [(2, [ACL_FRAME_AVG_TABLE[ACL_PWRSAVE]]),
+                                      (3, list(ACL_START_POINT_TABLE[0])),
+                                      (6, [ACL_OPR_TABLE[ACL_OPR]])])
+        pk += packet(ACL_DIM_FRM, ACL_DIM_FRM_OFS)
+        pk += packet(ACL_ONOFF, 0, [(1, [ACL_ONOFF_TABLE[ACL_PWRSAVE]])])
     # Not IRC (B8) or POC (B1 at 06, B8 at 53): Samsung's per-panel
     # compensation, tuned to calibration this port does not read, turned
     # the whole screen green (white text green, blue tiles green). The
@@ -510,6 +513,9 @@ def build(regs, variant):
 # takes no frame after it; 11-byte packets go through. F7 03 still latches
 # the pieces together. A B0 already in front of a packet adds to its offsets.
 CHUNK = 34	# the gamma goes whole: written in pieces it came out tinted
+WITH_GAMMA = False	# Gamma is factory-calibrated; writing CA on the fly corrupts tap points to red
+WITH_ELVSS_VINT = False	# B0 16 offset and voltage stepping cause green black and brightness jumps
+WITH_ACL = False	# ACL is disabled; writing B0 0F offset causes register desync
 WITH_IRC_POC = False	# see level_packets
 OFFSET_WRITES = False	# see split_long
 VENDOR_WRITES = True	# see vendor_packets; split_long is the old way
@@ -709,7 +715,8 @@ def selftest():
                 if want is not None and len(p) != want:
                     check(False, "%s level %d: %s is %d bytes" %
                           (variant, i, hexs(p[:1]), len(p)))
-            if step != i or pk[2] != [0xB1] + list(AOR_TABLE[variant][i]):
+            aor_pk = [p for p in pk if p[0] == 0xB1]
+            if step != i or not aor_pk or aor_pk[0] != [0xB1] + list(AOR_TABLE[variant][i]):
                 aor_ok = False
             n = nits_x100(brightness)
             if n < last_nits or LUM_TBL[idx] < last_lum:
@@ -717,15 +724,21 @@ def selftest():
             last_nits, last_lum = n, LUM_TBL[idx]
             if idx >= NR_LUMINANCE:
                 rows_ok = False
-        want = ((0xF0, 3), (0xCA, 35), (0xB1, 3), (0xB5, 4), (0xB0, 2),
-                (0xB5, 2), (0xF4, 3), (0xB4, 7), (0xB0, 2), (0xB4, 2),
-                (0x55, 2))
+        want = [(0xF0, 3)]
+        if WITH_GAMMA:
+            want.append((0xCA, 35))
+        want.append((0xB1, 3))
+        if WITH_ELVSS_VINT:
+            want += [(0xB5, 4), (0xB0, 2), (0xB5, 2), (0xF4, 3)]
+        if WITH_ACL:
+            want += [(0xB4, 7), (0xB0, 2), (0xB4, 2), (0x55, 2)]
         if WITH_IRC_POC:
-            want += ((0xB0, 2), (0xB8, 18), (0xB8, 2), (0xB0, 2),
-                     (0xB1, 11), (0xB0, 2), (0xB8, 3))
-        want += ((0xF7, 2), (0xF0, 3))
-        check(shapes == {want}, "%s: every level is the vendor's packets "
-              "(%d with their B0 offsets), lengths as the vendor arrays"
+            want += [(0xB0, 2), (0xB8, 18), (0xB8, 2), (0xB0, 2),
+                     (0xB1, 11), (0xB0, 2), (0xB8, 3)]
+        want += [(0xF7, 2), (0xF0, 3)]
+        want = tuple(want)
+        check(shapes == {want}, "%s: every level is the configured packets "
+              "(%d packets), lengths as expected"
               % (variant, len(want)))
         check(aor_ok, "%s: level i sends B1 star_a3_%s_aor_table[i], "
               "i = its PAC step" % (variant, variant))
@@ -735,12 +748,11 @@ def selftest():
         first, last = levels[0], levels[-1]
         check(LUM_TBL[first[3]] == 2 and LUM_TBL[last[3]] == 400,
               "%s: level 0 is 2 nits, level 511 400 nits" % variant)
-        # with no MTP offsets, the 400 nit row (gamma 2.20, no grey or
-        # colour offsets) has to come back as the tap points' centres
-        centres = [0x07] + [0x00] * 3 + [0x80] * 27 + [0x00] * 3
-        top = last[0][1][1:]
-        check(top == centres, "%s: zero MTP, 400 nits gives the centres "
-              "07 00 00 00 80.. 00 00 00 (got %s)" % (variant, hexs(top)))
+        if WITH_GAMMA:
+            centres = [0x07] + [0x00] * 3 + [0x80] * 27 + [0x00] * 3
+            top = last[0][1][1:]
+            check(top == centres, "%s: zero MTP, 400 nits gives the centres "
+                  "07 00 00 00 80.. 00 00 00 (got %s)" % (variant, hexs(top)))
         blob, stride = serialise(levels)
         sent = [[p for p, _ in vendor_packets(pk)] if VENDOR_WRITES else
                 split_long(pk) for pk, *_ in levels]
@@ -765,6 +777,9 @@ def main():
     ap.add_argument("-o", "--output", help="write the table here")
     ap.add_argument("--panel", choices=("s0", "s1"),
                     help="the panel's tables, instead of the ID (04)")
+    ap.add_argument("--nits", metavar="FILE",
+                    help="write each level's luminance, one per line (the "
+                         "shell's brightness ladder reads it)")
     ap.add_argument("--dump", action="store_true",
                     help="print each level's nits and packets")
     ap.add_argument("--selftest", action="store_true")
@@ -791,6 +806,10 @@ def main():
           % (variant, len(levels), stride), file=sys.stderr)
     if a.dump:
         dump(levels, sys.stdout)
+    if a.nits:
+        with open(a.nits, "w") as f:
+            for pk, brightness, step, idx in levels:
+                f.write("%.2f\n" % (nits_x100(brightness) / 100))
     if a.output:
         with open(a.output, "wb") as f:
             f.write(blob)

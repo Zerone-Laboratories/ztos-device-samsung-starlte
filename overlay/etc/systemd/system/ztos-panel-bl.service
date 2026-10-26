@@ -1,0 +1,12 @@
+[Unit]
+Description=ztOS: give the panel its full brightness table (smooth brightness)
+# before the shell starts, so it picks the panel's own levels
+Before=greetd.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ztos-panel-bl
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
